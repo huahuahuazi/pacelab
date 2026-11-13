@@ -14,7 +14,16 @@
  *      否则全马 42km 会直接把"减量周"顶成全年最大周。
  */
 
-import { EVENT_M, EVENT_SHORT, trainingPaces, fmtPace, timeForDistance, fmtDuration } from './core.js';
+import {
+  EVENT_M,
+  EVENT_SHORT,
+  trainingPaces,
+  fmtPace,
+  fmtDuration,
+  timeForDistance,
+  paceName,
+  PACE_META,
+} from './core.js';
 
 const SPEC = {
   '5K':  { weeks: 8,  minPeak: 20, capacity: 35, longStart: 6,  longMax: 11, longRatio: 0.38 },
@@ -68,6 +77,23 @@ function thisMonday(base = new Date()) {
 function addDays(d, n) {
   const x = new Date(d);
   x.setDate(x.getDate() + n);
+  return x;
+}
+
+/**
+ * 把任意一天对齐到「不早于它的第一个周一」。
+ *
+ * 为什么必须有这一步：计划是按周一~周日排的，每天的位置由 dow(0=周一) 决定。
+ * 旧代码直接把用户选的起始日当成第 0 天用 —— 用户选 11/13（周五），
+ * 那天就被渲染成「周一 11月13日」，整周七天全部错位，日程表自相矛盾。
+ *
+ * 向后对齐而不是向前：向前会落到已经过去的日期，把第一周变成半周。
+ */
+function alignToMonday(d) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  const dow = (x.getDay() + 6) % 7; // 0=周一
+  if (dow !== 0) x.setDate(x.getDate() + (7 - dow));
   return x;
 }
 
@@ -151,7 +177,7 @@ function makeQuality(phase, km, paces, targetEv, isPrimary) {
     distKm: total,
     paceKey: 'T',
     paceText: `${pT}/km`,
-    title: `门槛跑 ${total}km${isPrimary ? '' : '（次课）'}`,
+    title: `节奏跑 ${total}km${isPrimary ? '' : '（次课）'}`,
     desc: `热身 ${warm}km → 主体 ${body}km @ ${pT}（约 ${minutes} 分钟）→ 冷身 ${cool}km。能说短句但不想说话，就是对的强度。`,
   };
 }
@@ -188,7 +214,8 @@ export function generatePlan(opts) {
   if (baseKm < MIN_KM_FOR_4_DAYS && daysPerWeek > 3) daysPerWeek = 3;
   const tpl = TEMPLATE[daysPerWeek];
 
-  const start = opts.startDate
+  // 起始日期一律对齐到周一，理由见 alignToMonday
+  const rawStart = opts.startDate
     ? new Date(opts.startDate + 'T00:00:00')
     : (() => {
         const monday = thisMonday();
@@ -197,6 +224,7 @@ export function generatePlan(opts) {
         // 今天就是周一则从今天开始，否则给一周准备时间
         return monday.getTime() === today.getTime() ? monday : addDays(monday, 7);
       })();
+  const start = alignToMonday(rawStart);
 
   const days = [];
   const weekKms = [];
@@ -350,7 +378,7 @@ export function generatePlan(opts) {
           paceText: `${fmtPace(paces.E)}/km`,
           desc: `全程 E 配速，能完整说一句话。${
             targetEv === 'FM' && longFinal >= 24
-              ? '从 20km 起可以掺 3-5km 马拉松配速，模拟后程撞墙的感觉。'
+              ? '从 20km 起可以掺 3-5km 比赛配速，模拟后程撞墙的感觉。'
               : '唯一目标是跑完，不是跑快。'
           }`,
         });
@@ -397,6 +425,10 @@ export function generatePlan(opts) {
     daysPerWeek,
     requestedDpw,
     startDate: toDateStr(start),
+    // 用户原始选择 vs 实际起始日。不一致时 UI 必须说出来，
+    // 不能默默把日期挪了 —— 用户会以为自己选错了。
+    startDateRequested: toDateStr(rawStart),
+    startAligned: toDateStr(start) !== toDateStr(rawStart),
     paces,
     weekKms,
     days,
@@ -404,3 +436,127 @@ export function generatePlan(opts) {
 }
 
 export { PHASE_LABEL, SPEC };
+
+/* ---------------- 手动编辑后的重算 ---------------- */
+
+/**
+ * 用户改了某天的距离之后，周的合计、计划总量都必须跟着变。
+ * 不重算的话，计划页顶上写着「本周 40km」，下面加起来是 46km，用户第一反应是软件算错了。
+ *
+ * 只重算合计，不动别的日子 —— 用户改哪天就是改哪天，
+ * 自动去"平衡"其他天等于替他做决定，反而添乱。
+ */
+export function recalcPlanTotals(plan) {
+  if (!plan || !Array.isArray(plan.days)) return plan;
+  const sum = new Array(plan.weeks + 1).fill(0);
+  let total = 0;
+  for (const d of plan.days) {
+    const km = Number(d.distKm) || 0;
+    sum[d.week] = (sum[d.week] || 0) + km;
+    total += km;
+  }
+  plan.weekKms = [];
+  for (let i = 1; i <= plan.weeks; i++) plan.weekKms.push(r1(sum[i] || 0));
+  plan.totalKm = Math.round(total);
+  // 峰值也要跟着改，否则计划页的"峰值 XXkm"会和实际对不上
+  const regular = plan.weekKms.slice(0, Math.max(1, plan.weeks - 1));
+  plan.peakKm = regular.length ? r1(Math.max.apply(null, regular)) : plan.weekKms[0] || 0;
+  return plan;
+}
+
+/**
+ * 生成一份空骨架：只有日期和星期，所有日子都是休息。
+ * 给「自定义计划」用 —— 用户想从零排，就别塞给他一套我已经定好的安排。
+ */
+export function blankPlan(opts) {
+  const weeks = Math.max(1, Math.min(24, Number(opts.weeks) || 8));
+  const start = alignToMonday(
+    opts.startDate ? new Date(opts.startDate + 'T00:00:00') : alignToMonday(new Date())
+  );
+  const days = [];
+  for (let w = 0; w < weeks; w++) {
+    const weekStart = addDays(start, w * 7);
+    for (let dow = 0; dow < 7; dow++) {
+      days.push({
+        id: `w${w + 1}d${dow}`,
+        date: toDateStr(addDays(weekStart, dow)),
+        dow,
+        dowLabel: DOW_LABEL[dow],
+        week: w + 1,
+        phase: 'base',
+        type: 'rest',
+        title: '休息',
+        distKm: 0,
+        paceKey: null,
+        paceText: '',
+        desc: '还没安排。点这一天可以设跑法、距离和配速。',
+        done: false,
+        runId: null,
+      });
+    }
+  }
+  return {
+    id: 'plan_' + Date.now().toString(36),
+    createdAt: new Date().toISOString(),
+    custom: true,
+    targetEv: opts.targetEv || '10K',
+    targetLabel: EVENT_SHORT[opts.targetEv || '10K'],
+    vdotAtCreation: Number(opts.vdot) || 0,
+    weeks,
+    baseKm: 0,
+    peakKm: 0,
+    totalKm: 0,
+    daysPerWeek: Number(opts.daysPerWeek) || 4,
+    requestedDpw: Number(opts.daysPerWeek) || 4,
+    startDate: toDateStr(start),
+    startDateRequested: toDateStr(start),
+    startAligned: false,
+    paces: trainingPaces(Number(opts.vdot) || 0),
+    weekKms: new Array(weeks).fill(0),
+    days,
+  };
+}
+
+/** 把一天改成某种跑法，标题和描述按跑法自动生成 —— 用户只该填距离和配速 */
+export function retitleDay(day, paces) {
+  const km = Number(day.distKm) || 0;
+  const key = day.paceKey;
+
+  // 判断依据必须是「用户新设的 paceKey 和距离」，不是原来的 type。
+  // 用 day.type === 'rest' 当前置条件看着合理，实际会让空白计划里的每一天
+  // 永远改不成跑法 —— 因为它本来就是 rest，一进来就又被判成 rest。
+  if (!key || !(km > 0)) {
+    day.type = 'rest';
+    day.paceKey = null;
+    day.paceText = '';
+    day.distKm = 0;
+    day.title = day.dow === 0 ? '休息' : '休息 / 交叉训练';
+    day.desc = '可选：游泳、骑车 30 分钟，或 20 分钟核心 + 臀腿力量。';
+    return day;
+  }
+
+  const name = paceName(key);
+  day.paceText = fmtPace(paces[key]) + '/km';
+  const meta = PACE_META.find((p) => p.key === key);
+
+  if (key === 'I') {
+    const reps = Math.max(2, Math.min(10, Math.floor((km - 2.5) / 1.2) + 1));
+    day.type = 'quality';
+    day.title = `间歇 ${reps} × 800m`;
+    day.desc = `${reps} 组 800m @ ${fmtPace(paces.I)}，组间慢跑 400m 恢复。全程 ${km}km，含热身冷身。`;
+  } else if (key === 'F') {
+    day.type = 'quality';
+    day.title = `法特莱克 ${km}km`;
+    day.desc = `${km}km 变速：快段到 ${fmtPace(paces.T)}，慢段回到 ${fmtPace(paces.E)}。用路灯或路口当标记，别看表。`;
+  } else if (key === 'R') {
+    day.type = 'quality';
+    day.title = `冲刺 ${km}km`;
+    day.desc = `几组 200-400m @ ${fmtPace(paces.R)}，组间完全走回恢复。总量小，质量优先。`;
+  } else {
+    day.type = km >= 15 ? 'long' : key === 'T' ? 'quality' : 'easy';
+    // 15km 以上叫「长距离」而不是「轻松跑 18km」—— 同一件事，但前者是跑者的说法
+    day.title = `${day.type === 'long' ? '长距离' : name} ${km}km`;
+    day.desc = meta ? meta.feel : '';
+  }
+  return day;
+}

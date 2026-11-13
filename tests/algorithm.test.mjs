@@ -104,4 +104,53 @@ t('跑量不足时自动降为 3 练而不是硬排 4 练', () => {
   assert.ok(p.requestedDpw === 4);
 });
 
+/* ---------------- 生成参数必须真的生效（P0 回归） ---------------- */
+
+// 这几条对应一个真实事故：分段选择器只写了 data-act 没有 handler，
+// 于是 .on 永远停在默认值，不管用户选什么，生成出来都是 10K。
+// 算法层本来是对的，是调用侧把参数喂错了。这组用例锁死"参数->结果"的映射。
+
+t('目标距离选 5K 就生成 8 周，不是永远 10 周', () => {
+  const p = generatePlan({ targetEv: '5K', vdot: 45, baseWeekKm: 40, daysPerWeek: 4 });
+  assert.strictEqual(p.targetEv, '5K', '目标距离 ' + p.targetEv);
+  assert.strictEqual(p.weeks, 8, '周数 ' + p.weeks);
+});
+
+t('目标距离选半马就 12 周、全马就 16 周', () => {
+  assert.strictEqual(generatePlan({ targetEv: 'HM', vdot: 45, baseWeekKm: 45, daysPerWeek: 4 }).weeks, 12);
+  assert.strictEqual(generatePlan({ targetEv: 'FM', vdot: 45, baseWeekKm: 55, daysPerWeek: 4 }).weeks, 16);
+});
+
+t('每周天数选 5 练且跑量够，就真的排 5 练', () => {
+  const p = generatePlan({ targetEv: 'HM', vdot: 45, baseWeekKm: 45, daysPerWeek: 5 });
+  assert.strictEqual(p.daysPerWeek, 5, '实际 ' + p.daysPerWeek);
+  // 每周至少要真有 5 个跑步日
+  const w1 = p.days.filter((d) => d.week === 1 && d.type !== 'rest');
+  assert.strictEqual(w1.length, 5, '第一周跑步日 ' + w1.length);
+});
+
+/* ---------------- 日期必须对得上星期几 ---------------- */
+
+t('起始日选周五(11/13)，自动对齐到下一个周一(11/16)', () => {
+  const p = generatePlan({ targetEv: '5K', vdot: 45, baseWeekKm: 40, daysPerWeek: 4, startDate: '2026-11-13' });
+  assert.strictEqual(p.startDate, '2026-11-16', '起始日 ' + p.startDate);
+  assert.strictEqual(p.startAligned, true, '应标记为已对齐');
+});
+
+t('每一天的日期必须真的对得上它的星期', () => {
+  const p = generatePlan({ targetEv: '10K', vdot: 45, baseWeekKm: 40, daysPerWeek: 4, startDate: '2026-11-13' });
+  for (const d of p.days) {
+    // JS 的 getDay(): 0=周日。计划里 dow 是 0=周一，换算一下
+    const wd = new Date(d.date + 'T00:00:00').getDay();
+    const expect = (wd + 6) % 7;
+    assert.strictEqual(d.dow, expect, `${d.date} 标的是${d.dowLabel}，实际是第 ${expect} 天(0=周一)`);
+  }
+});
+
+t('起始日本来就是周一时不做任何挪动', () => {
+  const p = generatePlan({ targetEv: '5K', vdot: 45, baseWeekKm: 40, daysPerWeek: 4, startDate: '2026-11-16' });
+  assert.strictEqual(p.startDate, '2026-11-16');
+  assert.strictEqual(p.startAligned, false);
+});
+
 console.log(`\n${pass} 项通过${process.exitCode ? '，存在失败' : ''}\n`);

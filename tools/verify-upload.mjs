@@ -32,8 +32,8 @@ const EXP = FX.indexOf('user-vivo') === 0
   ? { dist: '1.55', h: '', mi: '8', s: '5', dur: 485 }
   : { dist: '10.02', h: '1', mi: '23', s: '45', dur: 5025 };
 
-const STATIC_PORT = 8897;
-const CALLBACK_PORT = 8901;
+const STATIC_PORT = 8937;
+const CALLBACK_PORT = 8941;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',

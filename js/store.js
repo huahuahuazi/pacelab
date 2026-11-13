@@ -13,6 +13,7 @@ const DEFAULT_STATE = {
   profile: {
     nickname: '',
     weightKg: null,
+    age: null,
     maxHR: null,
     restingHR: null,
   },

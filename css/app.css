@@ -338,6 +338,22 @@ main {
 .pace-key.T { background: rgba(255, 201, 60, 0.14); color: var(--warn); }
 .pace-key.I { background: var(--accent-soft); color: var(--accent); }
 .pace-key.R { background: rgba(255, 93, 98, 0.14); color: var(--danger); }
+/* 恢复跑和法特莱克是新加的两档：恢复用冷青，法特莱克用紫，和已有五色区分开 */
+.pace-key.REC { background: rgba(94, 210, 200, 0.14); color: #5ed2c8; font-size: 8.5px; }
+.pace-key.F { background: rgba(167, 139, 250, 0.16); color: #a78bfa; }
+
+/* 配速表里同时给配速区间和心率区间：只看配速跑不准的人，还能靠心率兜底 */
+.pace-val b { font-weight: 600; }
+.pace-val small {
+  display: block;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-faint);
+  letter-spacing: 0;
+  margin-top: 1px;
+}
+.pace-row[data-act] { cursor: pointer; }
+.pace-row[data-act]:active { opacity: 0.6; }
 
 .pace-name { flex: 1; font-size: 13.5px; }
 .pace-name small { display: block; color: var(--text-faint); font-size: 11px; }
@@ -398,6 +414,14 @@ main {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 心率 / 步频 / 步幅：比主指标弱一档，但不至于看不见 */
+.rec .main .meta-extra {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-family: var(--font-num);
+  margin-top: 2px;
+  letter-spacing: 0.1px;
 }
 
 .badge-src {
@@ -607,6 +631,27 @@ select.input {
   background-repeat: no-repeat;
   background-position: right 14px center;
   padding-right: 36px;
+}
+
+/* 三个并列的小输入（心率 / 步频 / 步幅）。
+   用 grid 而不是 flex：三个等宽列在任何屏宽下都不会挤成两行。 */
+.tri-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.tri-cell { display: flex; flex-direction: column; gap: 5px; }
+.tri-cell .input {
+  padding: 10px 8px;
+  text-align: center;
+  font-family: var(--font-num);
+  font-size: 15px;
+}
+.tri-cell span {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  text-align: center;
+  line-height: 1.2;
 }
 
 .field-row { display: flex; gap: 10px; }
@@ -939,3 +984,147 @@ select.input {
 .hide { display: none !important; }
 .dim { color: var(--text-dim); }
 .center { text-align: center; }
+
+/* ---------------- 体能画像 ---------------- */
+
+.fit-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-bottom: 14px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.fit-score {
+  font-family: var(--font-num);
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -1.5px;
+  line-height: 1;
+}
+.fit-score small {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--text-faint);
+  margin-top: 3px;
+}
+.fit-meta { flex: 1; }
+.fit-meta b { display: block; font-size: 15px; }
+.fit-meta span { font-size: 11.5px; color: var(--text-faint); }
+
+.fit-list { display: flex; flex-direction: column; gap: 14px; padding-top: 12px; }
+.fit-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 12.5px;
+  margin-bottom: 6px;
+}
+.fit-num {
+  font-family: var(--font-num);
+  font-size: 15px;
+  font-weight: 700;
+}
+.fit-bar {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--surface-3, rgba(255, 255, 255, 0.07));
+  overflow: hidden;
+}
+.fit-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  /* 宽度从 0 长出来，一眼能看出哪一项弱 */
+  transition: width 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.fit-advice {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* ---------------- 跑法说明弹层 ---------------- */
+
+.pace-detail-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.pace-detail-head .pace-key {
+  width: 34px; height: 34px; flex: 0 0 34px;
+  font-size: 12px;
+  border-radius: 10px;
+}
+
+.kv-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.kv-grid > div {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.kv-grid label {
+  display: block;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+.kv-grid b {
+  font-size: 12.5px;
+  font-family: var(--font-num);
+  line-height: 1.35;
+  display: block;
+}
+
+.felt-box {
+  background: var(--accent-soft, rgba(255, 255, 255, 0.04));
+  border-left: 3px solid var(--primary);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 11px 13px;
+  margin-bottom: 18px;
+}
+.felt-box label {
+  display: block;
+  font-size: 10.5px;
+  color: var(--primary);
+  margin-bottom: 5px;
+  letter-spacing: 0.3px;
+}
+.felt-box p { margin: 0; font-size: 13px; line-height: 1.55; }
+
+.rule-list { display: flex; flex-direction: column; gap: 14px; margin-bottom: 18px; }
+.rule b { display: block; font-size: 13px; margin-bottom: 3px; }
+.rule span { font-size: 11.5px; line-height: 1.55; color: var(--text-dim); display: block; }
+
+/* 计划日里可点击编辑的提示。
+   不做 hover 才显示 —— 手机上根本没有 hover，藏起来等于没有。 */
+.day .info[data-act] { cursor: pointer; }
+.day-act {
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--text-faint);
+  letter-spacing: 0.2px;
+}
+.day .info[data-act]:active { opacity: 0.55; }
+
+/* 六个跑法 + 休息 = 7 个按钮，等宽两列，拇指够得着 */
+.seg.seg-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.seg.seg-grid button {
+  padding: 10px 6px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+}

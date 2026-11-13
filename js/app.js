@@ -11,7 +11,7 @@
  */
 
 import * as C from './core.js';
-import { generatePlan, toDateStr, PHASE_LABEL } from './plan.js';
+import { generatePlan, toDateStr, PHASE_LABEL, retitleDay, recalcPlanTotals, blankPlan } from './plan.js';
 import * as S from './store.js';
 import { lineChart, barChart, weeklyBuckets } from './chart.js';
 import { recognizeRunImage, warmup } from './ocr.js';
@@ -19,8 +19,33 @@ import { recognizeRunImage, warmup } from './ocr.js';
 /* ================= 状态 ================= */
 
 let state = S.loadState();
-let stats = C.summarize(state.runs);
+
+/**
+ * 重算所有派生数据。
+ * 画像依赖 VDOT、用户资料（年龄/静息心率）和全部记录，三者任一变化都要重算，
+ * 所以统一收在一处，避免有的地方忘了更新。
+ */
+function recompute() {
+  stats = C.summarize(state.runs);
+  stats.fitness = C.buildFitnessProfile(state.runs, state.profile, stats.currentVdot);
+}
+let stats;
+recompute();
+
 const ui = { tab: 'home', modal: null, ocr: null, planWeeks: 4, planFilter: 'all' };
+
+// 支持 index.html#plan 直接打开某个 tab。
+// 调试和截图时省掉"打开→点三次"的步骤，也让某个页面可以被直接分享。
+//
+// 用 typeof 判断而不是直接读 location：单测在 Node 里跑，没有这个全局对象，
+// 模块顶层一碰就 ReferenceError，整个测试文件直接挂掉。
+(() => {
+  const h =
+    typeof location !== 'undefined'
+      ? String(location.hash || '').replace('#', '')
+      : '';
+  if (h === 'home' || h === 'records' || h === 'plan' || h === 'me') ui.tab = h;
+})();
 
 const esc = (s) =>
   String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -28,7 +53,7 @@ const esc = (s) =>
 function commit() {
   const ok = S.saveState(state);
   if (!ok) toast('写入失败：存储空间可能已满，请先到「我的」导出备份', true);
-  stats = C.summarize(state.runs);
+  recompute();
   return ok;
 }
 
@@ -93,22 +118,78 @@ function predGrid() {
   </div>`;
 }
 
+/**
+ * 六种训练法。点任意一行展开说明 —— 这张表的目的不是给数字，
+ * 是让跑者知道「今天该跑成什么样」，所以每一行都配了体感判断标准。
+ */
 function paceTable() {
   if (!stats.paces) return '';
+  const ranges = C.paceRanges(stats.paces);
+  const fz = stats.fitness ? stats.fitness.hrZones : null;
+
+  const rows = C.PACE_META.map((p) => {
+    const rg = ranges[p.key];
+    const z = fz ? fz.zones[p.key] : null;
+    return `<div class="pace-row" data-act="pace:info" data-key="${p.key}">
+      <div class="pace-key ${p.key}">${p.tag}</div>
+      <div class="pace-name">${esc(p.name)}<small>${esc(p.feel)}</small></div>
+      <div class="pace-val">
+        <b>${C.fmtPace(rg[0])}–${C.fmtPace(rg[1])}</b>
+        ${z ? `<small>${z[0]}–${z[1]} bpm</small>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+
   return `
-  <div class="section-title"><span>训练配速区间</span></div>
+  <div class="section-title"><span>六种跑法</span><span class="link" data-act="pace:info" data-key="__all">怎么用</span></div>
   <div class="card flat">
-    <div class="pace-list">
-      ${C.PACE_META.map(
-        (p) => `<div class="pace-row">
-          <div class="pace-key ${p.key}">${p.key}</div>
-          <div class="pace-name">${esc(p.name)}<small>${esc(p.desc)}</small></div>
-          <div class="pace-val">${C.fmtPace(stats.paces[p.key])}</div>
-        </div>`
-      ).join('')}
-    </div>
+    <div class="pace-list">${rows}</div>
   </div>
-  <p class="hint" style="margin:0 4px">单位：分钟/公里。轻松跑跑进门槛配速，是业余跑者最常见的错误。</p>`;
+  <p class="hint" style="margin:0 4px">上排是配速区间，下排是心率区间（点任意一行看详细说明）。${
+    fz && fz.estimated ? '心率按年龄和静息心率估算，填准这两项会更准确。' : ''
+  }</p>`;
+}
+
+/** 体能画像：四维打分 + 每项一句可执行建议 */
+function fitnessCard() {
+  const f = stats.fitness;
+  if (!f || !(stats.currentVdot > 0)) return '';
+
+  const barColor = (s) =>
+    s === null ? 'var(--text-faint)' : s >= 80 ? 'var(--primary)' : s >= 65 ? '#58a6ff' : s >= 50 ? 'var(--warn)' : 'var(--danger)';
+
+  const items = f.items
+    .map(
+      (it) => `<div class="fit-item">
+        <div class="fit-top">
+          <span>${esc(it.name)}</span>
+          <span class="fit-num" style="color:${barColor(it.score)}">${it.score === null ? '—' : it.score}</span>
+        </div>
+        <div class="fit-bar"><i style="width:${it.score === null ? 0 : it.score}%;background:${barColor(it.score)}"></i></div>
+        <p class="fit-advice">${esc(it.advice)}</p>
+      </div>`
+    )
+    .join('');
+
+  const overall = f.overallScore === null ? '—' : f.overallScore;
+  const coverage =
+    f.dataCoverage.known >= 4
+      ? '四项都有数据'
+      : `4 项中 ${f.dataCoverage.known} 项有数据，补齐后更准`;
+
+  return `
+  <div class="section-title"><span>体能画像</span></div>
+  <div class="card">
+    <div class="fit-head">
+      <div class="fit-score" style="color:${barColor(f.overallScore)}">${overall}<small>综合</small></div>
+      <div class="fit-meta">
+        <b>${esc(f.overallLabel)}</b>
+        <span>${esc(coverage)}</span>
+      </div>
+    </div>
+    <div class="fit-list">${items}</div>
+  </div>
+  <p class="hint" style="margin:0 4px">评分为训练参考，不是医学诊断。数据来源：Daniels VDOT、Tanaka 最大心率公式、Karvonen 储备心率法、ACWR 负荷研究。</p>`;
 }
 
 function trendCard() {
@@ -138,12 +219,19 @@ function recentCard() {
 function recRow(r) {
   const d = new Date(r.date);
   const ev = C.evaluateRun(r);
+  // 心率/步频/步幅都是选填，有什么显示什么，没有就不占位
+  const extras = [];
+  if (r.avgHr) extras.push(`${r.avgHr} bpm`);
+  if (r.cadence) extras.push(`${r.cadence} 步/分`);
+  if (r.strideCm) extras.push(`步幅 ${r.strideCm}cm`);
+
   return `<div class="rec">
     <div class="date"><b>${d.getDate()}</b><span>${d.getMonth() + 1}月</span></div>
     <div class="main">
       <div class="top"><span class="km">${Number(r.distanceKm).toFixed(2)}</span><span class="unit">km</span>
         ${r.source === 'image' ? '<span class="badge-src">图片</span>' : ''}</div>
       <div class="meta">${C.fmtDuration(r.durationSec)} · ${C.fmtPace(ev.pace)}/km</div>
+      ${extras.length ? `<div class="meta-extra">${extras.join(' · ')}</div>` : ''}
       ${r.note ? `<div class="note">${esc(r.note)}</div>` : ''}
     </div>
     <div class="right">
@@ -178,6 +266,7 @@ function viewHome() {
     ${heroCard()}
     ${predGrid()}
     ${trendCard()}
+    ${fitnessCard()}
     ${paceTable()}
     ${weekCard()}
     ${recentCard()}
@@ -233,7 +322,7 @@ function viewPlan() {
       <div class="pace-list">
         <div class="pace-row"><div class="pace-key E">周</div><div class="pace-name">按周推进<small>起点跑量取你近 30 天的实际周跑量</small></div></div>
         <div class="pace-row"><div class="pace-key M">增</div><div class="pace-name">周跑量增幅封顶 10%<small>每 4 周插一个减量周</small></div></div>
-        <div class="pace-row"><div class="pace-key T">质</div><div class="pace-name">每周最多 2 次质量课<small>门槛跑 / 间歇 / 比赛配速</small></div></div>
+        <div class="pace-row"><div class="pace-key T">质</div><div class="pace-name">每周最多 2 次质量课<small>节奏跑 / 间歇跑 / 冲刺跑</small></div></div>
         <div class="pace-row"><div class="pace-key R">减</div><div class="pace-name">最后两周减量<small>不练了，让腿变活</small></div></div>
       </div>
     </div>`;
@@ -300,10 +389,11 @@ function dayRow(d, plan, todayStr) {
 
   return `<div class="${cls.join(' ')}">
     <div class="dd"><b>${d.dowLabel}</b>${dateLabel}${isToday ? ' ·今' : ''}</div>
-    <div class="info">
+    <div class="info" data-act="day:edit" data-plan="${esc(plan.id)}" data-day="${esc(d.id)}">
       <div class="t ${isRest ? 'off' : ''}">${esc(d.title)}</div>
       <div class="s">${isRest ? esc(d.desc) : `${d.distKm} km · ${d.paceText}`}</div>
       ${isRest ? '' : `<div class="hint" style="margin-top:3px">${esc(d.desc)}</div>`}
+      <div class="day-act">${isRest ? '点这里安排训练' : '调整跑法 / 距离 / 配速'}</div>
     </div>
     ${
       isRest
@@ -341,12 +431,22 @@ function viewMe() {
           <input class="input" id="p-weight" type="number" inputmode="decimal" step="0.1" placeholder="选填" value="${p.weightKg || ''}" />
         </div>
         <div class="field">
+          <label>年龄 <span class="opt">岁</span></label>
+          <input class="input" id="p-age" type="number" inputmode="numeric" placeholder="选填" value="${p.age || ''}" />
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>静息心率 <span class="opt">bpm</span></label>
+          <input class="input" id="p-resthr" type="number" inputmode="numeric" placeholder="选填" value="${p.restingHR || ''}" />
+        </div>
+        <div class="field">
           <label>最大心率 <span class="opt">bpm</span></label>
           <input class="input" id="p-maxhr" type="number" inputmode="numeric" placeholder="选填" value="${p.maxHR || ''}" />
         </div>
       </div>
       <button class="btn primary sm" style="width:100%" data-act="profile:save">保存</button>
-      <p class="hint">这些字段目前不参与 VDOT 计算，只做记录。将来接入心率区间分析时会用到。</p>
+      <p class="hint">年龄和静息心率用来算心率区间（Tanaka 公式 + 储备心率法）。不填就按 30 岁 / 65 bpm 估算，区间会标「估算」。最大心率填实测值比公式更准。</p>
     </div>
 
     <div class="section-title"><span>数据管理</span></div>
@@ -469,6 +569,25 @@ function modalAddRun(preset) {
       ${durFieldHtml(pre.durationSec || 0, '不用全填，50 分钟就只在「分」里填 50')}
 
       <div class="field">
+        <label>跑动数据 <span class="opt">选填，填了能看体能画像</span></label>
+        <div class="tri-row">
+          <div class="tri-cell">
+            <input class="input" id="f-hr" type="text" inputmode="numeric" placeholder="152" value="${pre.avgHr || ''}" />
+            <span>平均心率 bpm</span>
+          </div>
+          <div class="tri-cell">
+            <input class="input" id="f-cad" type="text" inputmode="numeric" placeholder="174" value="${pre.cadence || ''}" />
+            <span>步频 步/分</span>
+          </div>
+          <div class="tri-cell">
+            <input class="input" id="f-stride" type="text" inputmode="numeric" placeholder="110" value="${pre.strideCm || ''}" />
+            <span>步幅 cm</span>
+          </div>
+        </div>
+        <div class="hint">步幅留空会自动按「配速 ÷ 步频」算出来，只填前两个就够。</div>
+      </div>
+
+      <div class="field">
         <label>备注 <span class="opt">选填</span></label>
         <input class="input" id="f-note" placeholder="今天状态怎么样" maxlength="60" value="${esc(pre.note || '')}" />
       </div>
@@ -518,6 +637,9 @@ function modalPlanNew() {
         <button class="btn ghost" data-act="modal:close">取消</button>
         <button class="btn primary" data-act="plan:gen">生成</button>
       </div>
+      <button class="btn ghost mt8" data-act="plan:custom" style="width:100%">
+        或者完全自定义 · 每天自己排
+      </button>
     </div>
   </div>`;
 }
@@ -585,7 +707,163 @@ function modalRender() {
   if (m.type === 'add') return modalAddRun(m.preset);
   if (m.type === 'planNew') return modalPlanNew();
   if (m.type === 'done') return modalDone(m.planId, m.dayId);
+  if (m.type === 'paceInfo') return modalPaceInfo(m.key);
+  if (m.type === 'dayEdit') return modalDayEdit(m.planId, m.dayId);
+  if (m.type === 'planCustom') return modalPlanCustom();
   return '';
+}
+
+/** 单日调整：改跑法、改距离、改配速 */
+function modalDayEdit(planId, dayId) {
+  const plan = state.plans.find((p) => p.id === planId);
+  if (!plan) return '';
+  const day = plan.days.find((d) => d.id === dayId);
+  if (!day) return '';
+
+  const isRest = !day.paceKey || !(day.distKm > 0);
+  const curKey = isRest ? 'rest' : day.paceKey;
+  const curPace = String(day.paceText || '').replace('/km', '').trim();
+  const choices = [{ key: 'rest', tag: '休', name: '休息' }].concat(
+    C.PACE_META.map((p) => ({ key: p.key, tag: p.tag, name: p.name }))
+  );
+
+  return `
+  <div class="mask" data-act="modal:bg">
+    <div class="sheet">
+      <div class="sheet-grip"></div>
+      <h3>调整这一天</h3>
+      <p class="sheet-sub">${day.date} ${day.dowLabel} · 第 ${day.week} 周</p>
+
+      <div class="field">
+        <label>跑法</label>
+        <div class="seg seg-grid" id="ed-key">
+          ${choices
+            .map(
+              (o) =>
+                `<button class="${o.key === curKey ? 'on' : ''}" data-act="seg" data-group="edkey" data-value="${o.key}">${o.tag} ${esc(o.name)}</button>`
+            )
+            .join('')}
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label>距离 <span class="opt">km</span></label>
+          <input class="input" id="ed-dist" type="text" inputmode="decimal" value="${day.distKm || ''}" placeholder="8" />
+        </div>
+        <div class="field">
+          <label>配速 <span class="opt">留空按跑法算</span></label>
+          <input class="input" id="ed-pace" type="text" value="${esc(curPace)}" placeholder="自动" />
+        </div>
+      </div>
+
+      <div class="field">
+        <label>这天的说明 <span class="opt">选填</span></label>
+        <textarea class="input" id="ed-desc" rows="2">${esc(day.desc || '')}</textarea>
+      </div>
+
+      <div class="row-btns">
+        <button class="btn ghost" data-act="modal:close">取消</button>
+        <button class="btn primary" data-act="day:save" data-plan="${planId}" data-day="${dayId}">保存</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/** 自定义计划：只给一个空骨架，怎么排全交给用户 */
+function modalPlanCustom() {
+  return `
+  <div class="mask" data-act="modal:bg">
+    <div class="sheet">
+      <div class="sheet-grip"></div>
+      <h3>自定义计划</h3>
+      <p class="sheet-sub">先生成一份空骨架，之后每天都能自己设跑法、距离和配速。适合已经有教练方案、或者想完全按自己节奏来的人。</p>
+
+      <div class="field">
+        <label>共几周</label>
+        <div class="seg" id="cs-weeks">
+          <button data-act="seg" data-group="csweeks" data-value="4">4 周</button>
+          <button class="on" data-act="seg" data-group="csweeks" data-value="8">8 周</button>
+          <button data-act="seg" data-group="csweeks" data-value="12">12 周</button>
+          <button data-act="seg" data-group="csweeks" data-value="16">16 周</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>每周打算练几天 <span class="opt">只是记个数，不限制你排几天</span></label>
+        <div class="seg" id="cs-dpw">
+          <button data-act="seg" data-group="csdpw" data-value="3">3</button>
+          <button class="on" data-act="seg" data-group="csdpw" data-value="4">4</button>
+          <button data-act="seg" data-group="csdpw" data-value="5">5</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>起始日期 <span class="opt">会自动对齐到周一</span></label>
+        <input class="input" id="cs-start" type="date" value="${toDateStr(new Date())}" />
+      </div>
+
+      <div class="row-btns">
+        <button class="btn ghost" data-act="modal:close">取消</button>
+        <button class="btn primary" data-act="plan:custom-gen">生成空骨架</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/** 单个训练法的详细说明，或者全部跑法的配比建议 */
+function modalPaceInfo(key) {
+  const fz = stats.fitness ? stats.fitness.hrZones : null;
+  const ranges = C.paceRanges(stats.paces) || {};
+
+  if (key === '__all') {
+    return `
+    <div class="mask" data-act="modal:bg">
+      <div class="sheet">
+        <div class="sheet-grip"></div>
+        <h3>六种跑法怎么分配</h3>
+        <p class="sheet-sub">比例错了，跑得再勤也不涨水平。下面是业余跑者能直接照做的分配原则。</p>
+        <div class="rule-list">
+          <div class="rule"><b>70–80% 的跑量给轻松跑 + 恢复跑</b><span>这是打底的量。绝大多数人练不上去，不是练得少，是轻松跑跑太快。</span></div>
+          <div class="rule"><b>节奏跑每周 1 次</b><span>连续 20–40 分钟。它对「能顶多久」的提升最直接。</span></div>
+          <div class="rule"><b>间歇跑每周最多 1 次</b><span>总量控制在周跑量 8% 以内。它是药，不是饭。</span></div>
+          <div class="rule"><b>冲刺跑只在赛前 2–3 周出现</b><span>练的是神经和弹性，不是心肺。跑量很小，恢复要足。</span></div>
+          <div class="rule"><b>法特莱克可以替代节奏跑</b><span>不想盯表、状态一般又不想休息时，用它最合适。</span></div>
+        </div>
+        <button class="btn ghost" data-act="modal:close">知道了</button>
+      </div>
+    </div>`;
+  }
+
+  const p = C.PACE_META.find((x) => x.key === key);
+  if (!p) return '';
+  const rg = ranges[p.key] || [0, 0];
+  const z = fz ? fz.zones[p.key] : null;
+
+  return `
+  <div class="mask" data-act="modal:bg">
+    <div class="sheet">
+      <div class="sheet-grip"></div>
+      <div class="pace-detail-head">
+        <div class="pace-key ${p.key}">${p.tag}</div>
+        <div>
+          <h3 style="margin:0">${esc(p.name)}</h3>
+          <p class="sheet-sub" style="margin:3px 0 0">${esc(p.desc)}</p>
+        </div>
+      </div>
+      <div class="kv-grid">
+        <div><label>配速</label><b>${C.fmtPace(rg[0])}–${C.fmtPace(rg[1])} /km</b></div>
+        <div><label>心率</label><b>${z ? z[0] + '–' + z[1] + ' bpm' : '填年龄后可见'}</b></div>
+        <div><label>步频</label><b>${p.cadence[0]}–${p.cadence[1]} 步/分</b></div>
+        <div><label>使用时机</label><b>${esc(p.when)}</b></div>
+      </div>
+      <div class="felt-box">
+        <label>强度对不对，看这一句</label>
+        <p>${esc(p.feel)}</p>
+      </div>
+      <button class="btn ghost" data-act="modal:close">知道了</button>
+    </div>
+  </div>`;
 }
 
 /* ================= 骨架 ================= */
@@ -783,6 +1061,12 @@ function handleClick(e) {
       break;
     }
 
+    case 'pace:info': {
+      ui.modal = { type: 'paceInfo', key: el.dataset.key };
+      render();
+      break;
+    }
+
     case 'plan:gen': {
       const evBtn = document.querySelector('#seg-ev button.on');
       const dpwBtn = document.querySelector('#seg-dpw button.on');
@@ -806,10 +1090,105 @@ function handleClick(e) {
         commit();
         ui.tab = 'plan';
         render();
-        toast(`已生成 ${plan.weeks} 周计划`);
+
+        // 两件以前静默发生、但用户必须知道的事：
+        //   1) 起始日不是周一时被对齐了（否则整周七天错位）
+        //   2) 跑量撑不起所选天数时被降级了（否则会排出"每天 2 公里"的假计划）
+        // 不说清楚，用户只会觉得"我选的没生效"。
+        const md = (s) => {
+          const p = String(s).split('-');
+          return `${Number(p[1])}/${Number(p[2])}`;
+        };
+        const notes = [];
+        if (plan.startAligned) notes.push(`起始日对齐到 ${md(plan.startDate)}（周一）`);
+        if (plan.daysPerWeek < plan.requestedDpw) {
+          notes.push(`当前跑量撑不起 ${plan.requestedDpw} 练，按 ${plan.daysPerWeek} 练排`);
+        }
+        toast(
+          `已生成 ${plan.weeks} 周 ${plan.targetLabel} 计划` +
+            (notes.length ? ` · ${notes.join(' · ')}` : '')
+        );
       } catch (err) {
         toast(err.message || '生成失败');
       }
+      break;
+    }
+
+    // ---- 逐日编辑 ----
+    case 'day:edit': {
+      ui.modal = { type: 'dayEdit', planId: el.dataset.plan, dayId: el.dataset.day };
+      render();
+      break;
+    }
+
+    case 'day:save': {
+      const plan = state.plans.find((p) => p.id === el.dataset.plan);
+      if (!plan) break;
+      const day = plan.days.find((d) => d.id === el.dataset.day);
+      if (!day) break;
+
+      const keyBtn = document.querySelector('#ed-key button.on');
+      const key = keyBtn ? keyBtn.dataset.value : 'rest';
+      const distEl = document.getElementById('ed-dist');
+      const paceEl = document.getElementById('ed-pace');
+      const descEl = document.getElementById('ed-desc');
+
+      const km = distEl ? parseFloat(String(distEl.value).replace(/[^\d.]/g, '')) : 0;
+      if (key !== 'rest' && !(km > 0)) {
+        flagField('ed-dist', '排了跑法就要填距离，不然没法算这周跑量');
+        break;
+      }
+      if (km > 60) {
+        flagField('ed-dist', '单次超过 60km，确认一下是不是多打了个 0');
+        break;
+      }
+
+      day.distKm = key === 'rest' ? 0 : Math.round(km * 10) / 10;
+      day.paceKey = key === 'rest' ? null : key;
+      // 先把 title / paceText / desc 按跑法自动生成，用户手填的说明再覆盖上去
+      retitleDay(day, plan.paces || stats.paces);
+      if (descEl && descEl.value.trim()) day.desc = descEl.value.trim();
+
+      // 手填配速优先于自动值。格式不对就忽略，不要让一个错格式把配速清空。
+      const manual = paceEl ? String(paceEl.value).trim() : '';
+      if (manual && /^\d{1,2}\s*['′]\s*\d{2}$/.test(manual)) {
+        day.paceText = manual.replace(/\s/g, '') + '/km';
+      }
+
+      recalcPlanTotals(plan);
+      commit();
+      ui.modal = null;
+      render();
+      toast(day.paceKey ? `已改为 ${day.title}` : '这一天改成了休息');
+      break;
+    }
+
+    // ---- 自定义计划 ----
+    case 'plan:custom': {
+      ui.modal = { type: 'planCustom' };
+      render();
+      break;
+    }
+
+    case 'plan:custom-gen': {
+      const wBtn = document.querySelector('#cs-weeks button.on');
+      const dBtn = document.querySelector('#cs-dpw button.on');
+      const startEl = document.getElementById('cs-start');
+      const plan = blankPlan({
+        weeks: wBtn ? Number(wBtn.dataset.value) : 8,
+        daysPerWeek: dBtn ? Number(dBtn.dataset.value) : 4,
+        vdot: stats.currentVdot,
+        startDate: startEl ? startEl.value : undefined,
+      });
+      state.plans = state.plans.filter((p) => p.id !== state.activePlanId);
+      state.plans.push(plan);
+      state.activePlanId = plan.id;
+      ui.modal = null;
+      ui.planWeeks = 4;
+      commit();
+      ui.tab = 'plan';
+      render();
+      toast('空骨架已生成 · 点任意一天开始安排');
       break;
     }
 
@@ -863,10 +1242,36 @@ function handleClick(e) {
     case 'profile:save': {
       const nick = document.getElementById('p-nick');
       const w = document.getElementById('p-weight');
+      const age = document.getElementById('p-age');
+      const rhr = document.getElementById('p-resthr');
       const hr = document.getElementById('p-maxhr');
+
+      // 年龄和心率都是"填了就得合理"的字段：录错一个数，整张心率表全歪
+      const ageV = age && age.value ? Number(age.value) : null;
+      const rhrV = rhr && rhr.value ? Number(rhr.value) : null;
+      const maxV = hr && hr.value ? Number(hr.value) : null;
+      if (ageV !== null && (ageV < 10 || ageV > 100)) {
+        flagField('p-age', '年龄看着不对，应该在 10-100 之间');
+        break;
+      }
+      if (rhrV !== null && (rhrV < 30 || rhrV > 120)) {
+        flagField('p-resthr', '静息心率应该在 30-120 之间');
+        break;
+      }
+      if (maxV !== null && (maxV < 100 || maxV > 230)) {
+        flagField('p-maxhr', '最大心率应该在 100-230 之间');
+        break;
+      }
+      if (rhrV !== null && maxV !== null && rhrV >= maxV) {
+        flagField('p-resthr', '静息心率不可能大于最大心率');
+        break;
+      }
+
       state.profile.nickname = nick ? nick.value.trim() : '';
       state.profile.weightKg = w && w.value ? Number(w.value) : null;
-      state.profile.maxHR = hr && hr.value ? Number(hr.value) : null;
+      state.profile.age = ageV;
+      state.profile.restingHR = rhrV;
+      state.profile.maxHR = maxV;
       commit();
       toast('已保存');
       break;
@@ -997,11 +1402,44 @@ function saveRun(planId, dayId) {
     return;
   }
 
+  // 三个可选指标：不填不影响记账，填了就要挡脏值。
+  // 范围取人体可能的边界，不是"健康范围" —— 这里只防手滑，不做医学判断。
+  const numOf = (id) => {
+    const el = document.getElementById(id);
+    if (!el) return 0;
+    const v = parseInt(String(el.value).replace(/[^\d]/g, ''), 10);
+    return Number.isFinite(v) ? v : 0;
+  };
+  const hr = numOf('f-hr');
+  const cadence = numOf('f-cad');
+  let strideCm = numOf('f-stride');
+
+  if (hr && (hr < 60 || hr > 230)) {
+    flagField('f-hr', '平均心率看起来不对，应该在 60-230 之间');
+    return;
+  }
+  if (cadence && (cadence < 100 || cadence > 260)) {
+    flagField('f-cad', '步频看起来不对，应该在 100-260 步/分之间');
+    return;
+  }
+  if (!strideCm && cadence) {
+    // 填了步频就能反算步幅：步幅 = 速度 ÷ 步频 = 60000 ÷ (配速秒数 × 步频)
+    // 用户少填一格，也少一个填错的机会
+    strideCm = C.strideFromPace(pace, cadence);
+  }
+  if (strideCm && (strideCm < 40 || strideCm > 250)) {
+    flagField('f-stride', '步幅看起来不对，应该在 40-250 厘米之间');
+    return;
+  }
+
   const run = {
     id: S.uid('run'),
     date,
     distanceKm: Math.round(km * 100) / 100,
     durationSec: sec,
+    avgHr: hr || null,
+    cadence: cadence || null,
+    strideCm: strideCm || null,
     note,
     source: ui.ocr && ui.ocr.parsed ? 'image' : 'manual',
     createdAt: new Date().toISOString(),
@@ -1107,6 +1545,18 @@ async function handleFileChange(e) {
     if (distEl && best.distanceKm) distEl.value = best.distanceKm;
     if (best.durationSec) fillDurationFields(best.durationSec);
   }
+
+  // 心率/步频/步幅：认出哪个填哪个，认不出就留空让用户手填。
+  // 这三个字段的识别只认明确单位和标签，所以数量少但可信。
+  const adv = (res.parsed && res.parsed.advanced) || {};
+  const fillOptional = (id, v) => {
+    const el = document.getElementById(id);
+    if (el && v) el.value = v;
+  };
+  fillOptional('f-hr', adv.avgHr);
+  fillOptional('f-cad', adv.cadence);
+  fillOptional('f-stride', adv.strideCm);
+
   if (refreshDurationHint) refreshDurationHint();
 
   const rawEl2 = box.querySelector('.ocr-raw');

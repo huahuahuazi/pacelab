@@ -616,6 +616,51 @@ function fmtPaceText(sec) {
   return mi + "'" + (s < 10 ? '0' + s : s) + '"';
 }
 
+/* ---------------- 心率 / 步频 / 步幅 ---------------- */
+
+/*
+ * 这三个字段的识别原则和距离、时长完全相反：**只认锚点，绝不猜**。
+ *
+ * 原因很直接 —— 一张运动卡片上有十几个裸数字（步数、心率、步频、步幅、
+ * 垂直振幅、触地时间、训练负荷……），没有单位根本分不清谁是谁。
+ * 猜错的代价是把 110 厘米当成心率填进去，污染体能画像，
+ * 比"没认出来，请你手动填"糟糕得多。
+ *
+ * 所以只在这些情况返回数值：
+ *   - 有明确中文标签：平均心率 / 步频 / 步幅
+ *   - 有明确单位：bpm、spm、步/分、厘米、cm
+ */
+const HR_ANCHOR = /(?:平均心率|静息心率|心率|heart\s*rate|avg\s*hr)[^\d]{0,8}(\d{2,3})/i;
+const HR_UNIT = /(\d{2,3})\s*(?:bpm|BPM|次\s*\/\s*分)/;
+const CAD_ANCHOR = /(?:平均步频|步频|cadence)[^\d]{0,8}(\d{2,3})/i;
+const CAD_UNIT = /(\d{2,3})\s*(?:步\s*\/\s*分|spm|SPM|步每分钟)/;
+const STRIDE_ANCHOR = /(?:平均步幅|步幅|stride\s*length|stride)[^\d]{0,8}(\d{2,3})/i;
+const STRIDE_UNIT = /(\d{2,3})\s*(?:厘米|cm|CM)/;
+
+function pickInRange(text, anchor, unit, lo, hi) {
+  const a = anchor.exec(text);
+  if (a) {
+    const v = Number(a[1]);
+    if (v >= lo && v <= hi) return v;
+  }
+  const u = unit.exec(text);
+  if (u) {
+    const v = Number(u[1]);
+    if (v >= lo && v <= hi) return v;
+  }
+  return null;
+}
+
+/** 只从有锚点/单位的文本里取这三个指标，取不到就返回 null */
+export function extractAdvanced(text) {
+  const s = normalize(text);
+  return {
+    avgHr: pickInRange(s, HR_ANCHOR, HR_UNIT, 60, 230),
+    cadence: pickInRange(s, CAD_ANCHOR, CAD_UNIT, 100, 260),
+    strideCm: pickInRange(s, STRIDE_ANCHOR, STRIDE_UNIT, 40, 250),
+  };
+}
+
 /* ---------------- 对外主函数 ---------------- */
 
 /**
@@ -651,6 +696,8 @@ export async function recognizeRunImage(file, onProgress) {
 
     const text = texts.join('\n');
     const parsed = extractRunData(text);
+    // 心率/步频/步幅单独走一套"只认锚点"的规则，和距离时长的推断逻辑互不干扰
+    parsed.advanced = extractAdvanced(text);
     return { ok: true, text, parsed };
   } catch (e) {
     console.error('[ocr] 识别失败', e);

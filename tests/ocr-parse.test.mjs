@@ -9,7 +9,7 @@
  */
 
 import assert from 'node:assert';
-import { extractRunData } from '../js/ocr.js';
+import { extractRunData, extractAdvanced } from '../js/ocr.js';
 import { evaluateRun } from '../js/core.js';
 
 let pass = 0;
@@ -264,6 +264,50 @@ t('纯函数：连续调用两次结果一致（正则 lastIndex 没串）', () 
   const a = extractRunData(EN_NO_UNIT).best;
   const b = extractRunData(EN_NO_UNIT).best;
   assert.deepStrictEqual(a, b);
+});
+
+/* ---------------- 心率 / 步频 / 步幅：只认锚点，不猜 ---------------- */
+
+t('有明确标签时认出心率、步频、步幅', () => {
+  const a = extractAdvanced(`户外跑步
+距离 10.02 公里
+用时 50:12
+平均心率 152 bpm
+步频 174 步/分
+步幅 110 厘米`);
+  assert.strictEqual(a.avgHr, 152, '心率 ' + a.avgHr);
+  assert.strictEqual(a.cadence, 174, '步频 ' + a.cadence);
+  assert.strictEqual(a.strideCm, 110, '步幅 ' + a.strideCm);
+});
+
+t('只有单位没标签也能认（英文 App 常见）', () => {
+  const a = extractAdvanced('Avg HR 148 bpm\nCadence 172 spm\nStride 118 cm');
+  assert.strictEqual(a.avgHr, 148, '心率 ' + a.avgHr);
+  assert.strictEqual(a.cadence, 172, '步频 ' + a.cadence);
+  assert.strictEqual(a.strideCm, 118, '步幅 ' + a.strideCm);
+});
+
+t('一串裸数字不能瞎猜成心率步频步幅', () => {
+  // 这是真机 vivo 截图里的样子：单位全被 OCR 吃掉了，只剩数字
+  const a = extractAdvanced('... 5\'12" 0:08:05 144* 174 4/3 5a A935 18 1,404 # 110 Bx PAR 5219 ERIE 131 w/3 8.18%');
+  assert.strictEqual(a.avgHr, null, '心率为空才对，实际 ' + a.avgHr);
+  assert.strictEqual(a.cadence, null, '步频为空才对，实际 ' + a.cadence);
+  assert.strictEqual(a.strideCm, null, '步幅为空才对，实际 ' + a.strideCm);
+});
+
+t('超出人体范围的值不认（防手滑和识别错）', () => {
+  assert.strictEqual(extractAdvanced('平均心率 999 bpm').avgHr, null, '999 不能当心率');
+  assert.strictEqual(extractAdvanced('步频 20 步/分').cadence, null, '20 不能当步频');
+  assert.strictEqual(extractAdvanced('步幅 500 厘米').strideCm, null, '500 不能当步幅');
+});
+
+t('普通截图里只有 Avg HR 时，就只认出心率，不凭空补步频步幅', () => {
+  // EN_NO_UNIT 里确实有「Avg HR 152 bpm」，所以心率该认出来；
+  // 没有步频步幅的标签和单位，那两个就必须是 null
+  const a = extractAdvanced(EN_NO_UNIT);
+  assert.strictEqual(a.avgHr, 152, '心率 ' + a.avgHr);
+  assert.strictEqual(a.cadence, null, '步频 ' + a.cadence);
+  assert.strictEqual(a.strideCm, null, '步幅 ' + a.strideCm);
 });
 
 console.log(`\n${pass} 项通过${process.exitCode ? '，存在失败' : ''}\n`);

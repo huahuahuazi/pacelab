@@ -18,8 +18,8 @@ android {
         applicationId 'com.pacelab.coach'
         minSdk 24
         targetSdk 34
-        versionCode 3
-        versionName '1.2.0'
+        versionCode 4
+        versionName '1.3.0'
         // 只保留中文和英文资源，安装包少几百 KB
         resourceConfigurations += ['zh', 'en']
     }

@@ -29,7 +29,7 @@ const out = [];
 const log = (s) => { out.push(s); document.getElementById('probe').textContent = out.join('\n'); };
 const report = (obj) => {
   // 注意：不能在拼好的 JSON 上做截断，会变成非法 JSON 被服务端丢弃
-  fetch('http://127.0.0.1:8901/r?d=' + encodeURIComponent(JSON.stringify(obj)), { mode: 'no-cors' }).catch(() => {});
+  fetch('http://127.0.0.1:8941/r?d=' + encodeURIComponent(JSON.stringify(obj)), { mode: 'no-cors' }).catch(() => {});
 };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const v = (id) => { const e = document.getElementById(id); return e ? e.value : null; };
