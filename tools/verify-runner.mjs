@@ -103,7 +103,7 @@ const check = (ok, msg, extra) => { if (!ok) bad++; console.log(`  ${ok ? 'PASS'
 
   check(!!info, '页面里有火柴人 .runner-art');
   if (info) {
-    check(info.frames === 9, '序列帧 9 张都加载了', info.frames + ' 张');
+    check(info.frames === 72, '视频抽帧 72 张都加载了', info.frames + ' 张');
     check(info.inCard, '火柴人完整落在卡片内（没被裁）', `box ${Math.round(info.box.w)}x${Math.round(info.box.h)}`);
   }
 

@@ -35,11 +35,16 @@ function recompute() {
 let stats;
 recompute();
 
-// 预热火柴人的 9 张序列帧：提前解码，切帧时才不会闪白。
+// 视频抽帧：72 帧 = 9 个完整跑步周期 × 每周期 8 帧。
+// 8 帧是视频自相关算出来的循环长度，取 9 个整数周期保证首尾无缝。
+const RUNNER_FRAMES = 72;
+const FRAMES_PER_CYCLE = 8;
+
+// 预热序列帧：提前解码，切帧时才不会闪白。
 // 用 typeof 判断而不是直接 new Image()：单测在 node 里跑，没有这个构造函数，
 // 模块顶层一碰就抛错，整个测试文件跟着挂。
 if (typeof Image !== 'undefined') {
-  for (let i = 1; i <= 9; i++) {
+  for (let i = 1; i <= RUNNER_FRAMES; i++) {
     const im = new Image();
     im.src = `assets/runner/f${i}.png`;
   }
@@ -167,12 +172,11 @@ function runnerFigure() {
 
   const sub = `近 7 天 · ${rh.count} 次${rh.estimated ? '（估算）' : ''}`;
 
-  // 逐帧垂直补偿：9 帧头顶点在原图里相差 20px，直接播会上下乱跳。
-  // 统一对齐到「最靠下的那个头位」，并且只往下移不往上 —— 往上会把头顶怼进气泡里。
-  const DY = [0.0, 2.4, 2.4, 7.9, 9.7, 9.7, 9.7, 12.2, 12.2];
+  // 72 帧全部来自视频本身（去重后按 8 帧一个循环取 9 个完整周期），
+  // 头顶点只差 6px，就是跑步该有的自然起伏，不需要再做垂直补偿。
   let frames = '';
-  for (let i = 1; i <= 9; i++) {
-    frames += `<img class="rf" style="--dy:${DY[i - 1]}px" src="assets/runner/f${i}.png" alt="" draggable="false">`;
+  for (let i = 1; i <= RUNNER_FRAMES; i++) {
+    frames += `<img class="rf" src="assets/runner/f${i}.png" alt="" draggable="false">`;
   }
 
   return `
@@ -224,7 +228,9 @@ function startRunnerAnim() {
   if (!N) return;
 
   const cadence = Math.min(210, Math.max(120, Number(rh.cadence) || 170));
-  const cycleMs = (120 / cadence) * 1000;
+  // 一个双步周期 = 120/步频 秒；这段序列里含 N/8 个周期，
+  // 所以整段播完的时间要按周期数放大，速度才和真实步频对得上。
+  const cycleMs = (120 / cadence) * 1000 * (N / FRAMES_PER_CYCLE);
   const t0 = performance.now();
 
   let lastI = -1;

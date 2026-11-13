@@ -201,18 +201,18 @@ main {
    叠放而不是换 src，是为了避免切帧时闪白 —— 图片早就解码好了。 */
 .runner-frames {
   position: absolute;
-  right: 14px;
-  bottom: 4px;
-  width: 74px;
-  height: 105px;
-  filter: drop-shadow(0 0 9px rgba(22, 224, 161, 0.3));
+  right: 8px;
+  bottom: 2px;
+  width: 88px;
+  height: 112px;
+  filter: drop-shadow(0 0 9px rgba(22, 224, 161, 0.35)) brightness(1.15);
 }
 .runner-frames .rf {
   position: absolute;
   left: 0;
   top: 0;
   width: 100%;
-  height: 92px;
+  height: 108px;
   object-fit: contain;
   object-position: center top;
   opacity: 0;
@@ -225,7 +225,7 @@ main {
    人就在路上跑而不是在半空浮着。 */
 .runner-track {
   position: absolute;
-  left: 26%;
+  left: 40%;
   right: -6px;
   top: 151px;
   height: 1.5px;
