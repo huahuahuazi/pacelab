@@ -5,7 +5,13 @@
 
 纯静态页面，无后端、无账号、无数据上传。所有数据只存在你自己的设备上。
 
-<img src="assets/screenshot-home.png" width="320" alt="首页" />
+**装到手机**：[下载 PaceLab-1.3.0.apk](https://github.com/huahuahuazi/pacelab/releases/latest) · Android 7.0+ · 12.9MB · 离线可用
+**不想装**：直接用[网页版](https://huahuahuazi.github.io/pacelab/)，浏览器打开就能用，还能「添加到主屏幕」当 App
+
+<p>
+<img src="assets/screenshot-home.png" width="300" alt="首页" />
+<img src="assets/screenshot-fitness.png" width="300" alt="体能画像与六种跑法" />
+</p>
 
 ---
 
