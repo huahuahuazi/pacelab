@@ -43,17 +43,21 @@
 
 ## 部署到 GitHub Pages（3 分钟）
 
+本地目录叫「跑步app」，仓库已经初始化并完成首次提交，只剩关联远程这一步：
+
 ```bash
-# 1. 在 GitHub 新建一个仓库，比如 running-coach
-cd running-coach
-git init
-git add .
-git commit -m "feat: 配速教练 v1.0"
+# 1. 在 GitHub 新建一个空仓库，名字建议 pacelab（别用中文名，URL 会变成转义串）
 
 # 2. 关联并推送（把 <你的用户名> 换掉）
-git remote add origin https://github.com/<你的用户名>/running-coach.git
-git branch -M main
+git remote add origin https://github.com/<你的用户名>/pacelab.git
 git push -u origin main
+```
+
+推之前先确认作者邮箱是对的 —— 仓库初始提交用的是占位邮箱，改掉再推，否则提交记录里的作者信息是错的：
+
+```bash
+git config user.email "你的邮箱@example.com"
+git commit --amend --reset-author --no-edit
 ```
 
 然后到仓库 **Settings → Pages**：
@@ -62,7 +66,7 @@ git push -u origin main
 - Branch 选 `main`，目录选 `/ (root)`
 - 保存，等 1 分钟
 
-访问 `https://<你的用户名>.github.io/running-coach/` 即可。
+访问 `https://<你的用户名>.github.io/pacelab/` 即可。
 
 所有资源都用相对路径引用，**放在子路径下也能正常工作**，不用改任何配置。
 
@@ -98,7 +102,7 @@ cd android
 ## 目录结构
 
 ```
-running-coach/
+跑步app/
 ├── index.html              入口
 ├── manifest.webmanifest    PWA 配置（图标、全屏、主题色）
 ├── sw.js                   离线缓存（改业务代码记得升 VERSION）

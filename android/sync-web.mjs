@@ -13,7 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const SRC = path.resolve(HERE, '..');               // running-coach/
+const SRC = path.resolve(HERE, '..');               // 跑步app/
 const DST = path.join(HERE, 'app/src/main/assets/www');
 
 const COPY = [
