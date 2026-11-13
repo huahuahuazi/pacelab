@@ -1,0 +1,25 @@
+# 换行统一：源码一律 LF 入库，Windows 签出时按需转换。
+# 不配这个的话，Git Bash 的 autocrlf 会把整个工程标成 modified，
+# 后面每次 diff 都是一屏噪音，真正的改动反而看不见。
+* text=auto eol=lf
+
+# 二进制：不能让 git 尝试做文本合并，否则文件会被悄悄改坏
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.svg text
+*.wasm binary
+*.traineddata binary
+*.apk binary
+*.jar binary
+*.keystore binary
+*.jks binary
+*.zip binary
+
+# Windows 批处理必须是 CRLF，否则 cmd 解析会出问题
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Gradle wrapper 是可执行 shell 脚本，必须是 LF
+gradlew text eol=lf
+gradlew.bat text eol=crlf

@@ -1,0 +1,65 @@
+plugins {
+    id 'com.android.application'
+}
+
+// 自签名密钥信息放在 android/keystore.properties（已被 .gitignore 排除），
+// 不写死在构建脚本里 —— 仓库里出现明文密码是典型事故。
+def keystorePropsFile = rootProject.file('keystore.properties')
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+
+android {
+    namespace 'com.pacelab.coach'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.pacelab.coach'
+        minSdk 24
+        targetSdk 34
+        versionCode 3
+        versionName '1.2.0'
+        // 只保留中文和英文资源，安装包少几百 KB
+        resourceConfigurations += ['zh', 'en']
+    }
+
+    signingConfigs {
+        if (keystorePropsFile.exists()) {
+            release {
+                storeFile rootProject.file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+        release {
+            minifyEnabled false
+            // 配好密钥就用正式签名，没配就退回 debug 签名，保证任何时候都能出包
+            signingConfig keystorePropsFile.exists() ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // 网页资源已压缩过（图片/wasm），无需再走 aapt 压缩，反而加快加载
+    androidResources {
+        noCompress += ['wasm', 'traineddata', 'gz']
+    }
+}
+
+dependencies {
+    // WebViewAssetLoader：把 assets 映射到 https://appassets.androidplatform.net
+    // 这是本工程最关键的一个依赖 —— 直接用 file:// 加载会在 ES module 上被 CORS 拦死
+    implementation 'androidx.webkit:webkit:1.11.0'
+}

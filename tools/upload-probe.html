@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>上传识别链路探针</title>
+  <link rel="stylesheet" href="../css/app.css" />
+</head>
+<body>
+<div id="app"></div>
+<div id="toast" class="toast" hidden></div>
+<div id="probe" style="position:fixed;left:0;right:0;bottom:0;background:#fff;color:#000;font:12px/1.5 monospace;z-index:99999;padding:6px;white-space:pre-wrap"></div>
+
+<!-- 必须在 app.js 之前清空：否则上一轮的记录还在，断言「入库 1 条」永远失败 -->
+<script>
+  try { localStorage.removeItem('pacelab.state.v1'); } catch (e) {}
+</script>
+
+<script type="module" src="../js/app.js"></script>
+<script>
+/**
+ * 供 tools/verify-upload.mjs 使用：模拟「用户从相册选了一张截图」，
+ * 走完 上传 → 预处理 → 识别 → 自动填入 → 保存 全链路，把每步结果回传。
+ *
+ * 不能用 --virtual-time-budget 测这条链路：虚拟时间会把轮询瞬间跑完，
+ * 而 OCR 在 Worker 里是真实耗时，两者根本对不上。只能起回调服务用真实时间等。
+ */
+const out = [];
+const log = (s) => { out.push(s); document.getElementById('probe').textContent = out.join('\n'); };
+const report = (obj) => {
+  // 注意：不能在拼好的 JSON 上做截断，会变成非法 JSON 被服务端丢弃
+  fetch('http://127.0.0.1:8901/r?d=' + encodeURIComponent(JSON.stringify(obj)), { mode: 'no-cors' }).catch(() => {});
+};
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const v = (id) => { const e = document.getElementById(id); return e ? e.value : null; };
+
+(async () => {
+  try {
+    await wait(400);
+    document.querySelector('[data-act="open:add"]').click();
+    await wait(250);
+
+    const input = document.getElementById('f-file');
+    const drop = document.querySelector('.drop');
+    if (!input || !drop) {
+      report({ t: 'fatal', m: '弹层里没有 f-file 或 .drop' });
+      return;
+    }
+
+    // 1) 覆盖层命中测试：手指点上传区，命中的必须就是原生 input
+    const dr = drop.getBoundingClientRect();
+    const ir = input.getBoundingClientRect();
+    const hit = document.elementFromPoint(dr.left + dr.width / 2, dr.top + dr.height / 2);
+    const cs = getComputedStyle(input);
+    report({
+      t: 'hit',
+      display: cs.display,
+      opacity: cs.opacity,
+      dropW: Math.round(dr.width),
+      inputW: Math.round(ir.width),
+      hitIsInput: hit === input,
+      hitTag: hit.tagName,
+    });
+
+    // 2) 塞一张真图，等价于用户从相册选完
+    // 默认跑 cn-dark，可用 ?fx=user-vivo-card.jpg 换成别的样本图
+    const fx = new URLSearchParams(location.search).get('fx') || 'cn-dark.png';
+    const blob = await (await fetch('../tools/fixtures/' + fx)).blob();
+    const file = new File([blob], fx, { type: /jpe?g$/i.test(fx) ? 'image/jpeg' : 'image/png' });
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    // 3) 等识别完成（真实时间，最多 25s）
+    let waited = 0;
+    let done = false;
+    while (waited < 25000) {
+      await wait(200);
+      waited += 200;
+      const box = document.getElementById('ocr-box');
+      const html = box ? box.innerHTML : '';
+      if (html.includes('已自动填入') || html.includes('识别失败') || html.includes('没有认出')) {
+        done = true;
+        break;
+      }
+    }
+
+    const box = document.getElementById('ocr-box');
+    report({
+      t: 'ocr',
+      waitedMs: waited,
+      done,
+      autoFilled: /已自动填入/.test(box ? box.innerHTML : ''),
+      boxLen: box ? box.innerHTML.length : 0,
+      distanceKm: v('f-dist'),
+      h: v('f-h'),
+      mi: v('f-m'),
+      s: v('f-s'),
+      hint: (document.getElementById('f-dur-hint') || {}).textContent || '',
+    });
+
+    // 4) 直接保存，验证识别结果能落库
+    document.querySelector('[data-act="run:save"]').click();
+    await wait(500);
+
+    let st = {};
+    try { st = JSON.parse(localStorage.getItem('pacelab.state.v1') || '{}'); } catch (_) {}
+    const runs = st.runs || [];
+    report({
+      t: 'save',
+      count: runs.length,
+      last: runs.length ? runs[runs.length - 1] : null,
+      modalClosed: !document.querySelector('.mask'),
+    });
+
+    report({ t: 'done' });
+  } catch (e) {
+    report({ t: 'fatal', m: (e && (e.name + ': ' + e.message)) || String(e) });
+  }
+})();
+</script>
+</body>
+</html>

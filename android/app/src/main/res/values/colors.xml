@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 和网页 :root 里的配色保持一致，避免启动瞬间闪白 -->
+    <color name="appBg">#0B0D10</color>
+    <color name="appAccent">#16E0A1</color>
+    <color name="ic_launcher_background">#0B0D10</color>
+</resources>

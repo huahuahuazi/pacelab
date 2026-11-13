@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8" /><title>OCR 变体探针</title></head>
+<body>
+<div id="r">running</div>
+<script type="module">
+/**
+ * 受控实验：同一张图，跑「预处理变体 × 版面分割模式」的笛卡尔积，全部回传原始文本。
+ * 目的只有一个 —— 用数据决定 preprocess() 该怎么写，而不是靠猜。
+ */
+const IMG = './fixtures/user-vivo-card.jpg';
+
+const put = (s) => { document.getElementById('r').textContent = s; };
+const report = (obj) => {
+  const s = encodeURIComponent(JSON.stringify(obj));
+  fetch('http://127.0.0.1:8912/r?d=' + s, { mode: 'no-cors' }).catch(() => {});
+};
+const errStr = (e) => (!e ? 'null' : (e.name || '?') + ': ' + (e.message || ''));
+
+window.addEventListener('error', (e) => report({ t: 'window.error', m: e.message }));
+window.addEventListener('unhandledrejection', (e) => report({ t: 'unhandledrejection', m: errStr(e.reason) }));
+
+function loadToCanvas(src, longEdgeTarget) {
+  return new Promise((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => {
+      const w0 = im.naturalWidth, h0 = im.naturalHeight;
+      const le = Math.max(w0, h0);
+      const scale = longEdgeTarget ? longEdgeTarget / le : 1;
+      const w = Math.max(1, Math.round(w0 * scale));
+      const h = Math.max(1, Math.round(h0 * scale));
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(im, 0, 0, w, h);
+      c._ctx = ctx;
+      c._orig = { w0, h0 };
+      resolve(c);
+    };
+    im.onerror = () => reject(new Error('decode fail'));
+    im.src = src;
+  });
+}
+
+function grayPixels(c) {
+  const ctx = c._ctx;
+  const d = ctx.getImageData(0, 0, c.width, c.height);
+  const px = d.data;
+  for (let i = 0; i < px.length; i += 4) {
+    const g = (px[i] * 77 + px[i + 1] * 150 + px[i + 2] * 29) >> 8;
+    px[i] = px[i + 1] = px[i + 2] = g;
+  }
+  return d;
+}
+
+function percentile(data, n, pct) {
+  const hist = new Uint32Array(256);
+  const px = data.data;
+  for (let i = 0; i < px.length; i += 4) hist[px[i]]++;
+  let acc = 0;
+  const target = n * pct;
+  for (let i = 0; i < 256; i++) {
+    acc += hist[i];
+    if (acc > target) return i;
+  }
+  return 255;
+}
+
+function meanLuma(data) {
+  const px = data.data;
+  let sum = 0;
+  for (let i = 0; i < px.length; i += 4) sum += px[i];
+  return sum / (px.length / 4);
+}
+
+function otsu(data) {
+  const px = data.data;
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < px.length; i += 4) hist[px[i]]++;
+  const total = px.length / 4;
+  let sum = 0;
+  for (let i = 0; i < 256; i++) sum += i * hist[i];
+  let sumB = 0, wB = 0, best = 0, thr = 127;
+  for (let i = 0; i < 256; i++) {
+    wB += hist[i];
+    if (!wB) continue;
+    const wF = total - wB;
+    if (!wF) break;
+    sumB += i * hist[i];
+    const mB = sumB / wB;
+    const mF = (sum - sumB) / wF;
+    const v = wB * wF * (mB - mF) * (mB - mF);
+    if (v > best) { best = v; thr = i; }
+  }
+  return thr;
+}
+
+function applyVariant(base, mode) {
+  const c = document.createElement('canvas');
+  c.width = base.width; c.height = base.height;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(base, 0, 0);
+  const d = grayPixels({ _ctx: ctx, width: c.width, height: c.height });
+  const px = d.data;
+  const n = c.width * c.height;
+  const lo = percentile(d, n, 0.02);
+  const hi = percentile(d, n, 0.98);
+  const span = Math.max(1, hi - lo);
+  const mean = meanLuma(d);
+
+  if (mode === 'gray') {
+    for (let i = 0; i < px.length; i += 4) {
+      let v = ((px[i] - lo) * 255) / span;
+      v = v < 0 ? 0 : v > 255 ? 255 : v;
+      px[i] = px[i + 1] = px[i + 2] = v;
+    }
+  } else if (mode === 'invert') {
+    for (let i = 0; i < px.length; i += 4) {
+      let v = ((px[i] - lo) * 255) / span;
+      v = v < 0 ? 0 : v > 255 ? 255 : v;
+      v = 255 - v;
+      px[i] = px[i + 1] = px[i + 2] = v;
+    }
+  } else if (mode === 'otsu') {
+    const t = otsu(d);
+    for (let i = 0; i < px.length; i += 4) {
+      const v = px[i] > t ? 255 : 0;
+      px[i] = px[i + 1] = px[i + 2] = v;
+    }
+  } else if (mode === 'otsuInv') {
+    const t = otsu(d);
+    for (let i = 0; i < px.length; i += 4) {
+      const v = px[i] > t ? 0 : 255;
+      px[i] = px[i + 1] = px[i + 2] = v;
+    }
+  }
+  ctx.putImageData(d, 0, 0);
+  c._mean = mean;
+  c._lo = lo; c._hi = hi;
+  return c;
+}
+
+(async () => {
+  const t0 = performance.now();
+  try {
+    const s = document.createElement('script');
+    s.src = '../vendor/tesseract/tesseract.min.js';
+    await new Promise((res, rej) => { s.onload = res; s.onerror = () => rej(new Error('engine load fail')); document.head.appendChild(s); });
+    put('engine ok');
+
+    const worker = await window.Tesseract.createWorker('eng', 1, {
+      workerPath: '../vendor/tesseract/worker.min.js',
+      corePath: '../vendor/tesseract/core',
+      langPath: '../vendor/tessdata',
+      gzip: false,
+    });
+
+    const base = await loadToCanvas(IMG, 2200);
+    report({ t: 'meta', w: base._orig.w0, h: base._orig.h0, scaled: base.width + 'x' + base.height });
+
+    const modes = ['gray', 'invert', 'otsu', 'otsuInv'];
+    const psms = ['3', '6', '11'];
+
+    for (const mode of modes) {
+      const canvas = applyVariant(base, mode);
+      report({ t: 'variant', mode, mean: Math.round(canvas._mean), lo: canvas._lo, hi: canvas._hi });
+      for (const psm of psms) {
+        await worker.setParameters({ tessedit_pageseg_mode: psm });
+        const t1 = performance.now();
+        const { data } = await worker.recognize(canvas);
+        const dt = ((performance.now() - t1) / 1000).toFixed(1);
+        report({
+          t: 'result',
+          key: mode + '/psm' + psm,
+          seconds: dt,
+          conf: Math.round(data.confidence || 0),
+          text: (data.text || '').replace(/\s+/g, ' ').slice(0, 420),
+        });
+        put(mode + '/' + psm + ' ' + dt + 's');
+      }
+    }
+
+    await worker.terminate();
+    report({ t: 'done', seconds: ((performance.now() - t0) / 1000).toFixed(1) });
+  } catch (e) {
+    report({ t: 'fatal', m: errStr(e) });
+  }
+})();
+</script>
+</body>
+</html>

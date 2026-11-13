@@ -1,0 +1,29 @@
+# 无依赖纯静态站点，直接部署
+node_modules/
+dist/
+*.log
+
+# 编辑器与系统
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 本地临时文件
+_*.html
+_*.mjs
+_*.png
+
+# 安卓构建产物
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+# 签名密钥：绝不入库。clone 后没有它也能构建（自动退回 debug 签名）
+*.keystore
+*.jks
+android/keystore.properties
+
+# 网页资源在打包时由 android/sync-web.mjs 同步生成，不入库
+android/app/src/main/assets/www/

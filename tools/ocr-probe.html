@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8" /><title>OCR 探针</title></head>
+<body>
+<div id="r">running</div>
+<script type="module">
+/**
+ * 供 tools/verify-ocr.mjs 使用：真跑一遍识别，把每一步结果回传给本地回调服务。
+ * 单独用浏览器打开没有意义（回调服务不在）。
+ *
+ * 一次跑多个用例：每个 fixture 单独识别一遍，结果分别回传。
+ * 引擎和有 worker 只初始化一次，正好顺带验证「复用 worker 不掉进度」。
+ */
+const CASES = [
+  { name: 'run-shot', ext: 'png' },
+  { name: 'cn-dark', ext: 'png' },
+  { name: 'user-vivo-card', ext: 'jpg' },
+];
+
+const log = [];
+const put = (s) => { log.push(s); document.getElementById('r').textContent = log.join(' | '); };
+/**
+ * 回传结果。注意：绝对不能在「拼好的 JSON 字符串」上做 slice ——
+ * 一旦截断就变成非法 JSON，服务端 parse 失败会把整条结果静默丢掉。
+ * 要截只能截单个字段。
+ */
+const report = (obj) => {
+  const s = encodeURIComponent(JSON.stringify(obj));
+  fetch('http://127.0.0.1:8900/r?d=' + s, { mode: 'no-cors' }).catch(() => {});
+};
+const errStr = (e) => (!e ? 'null' : (e.name || '?') + ': ' + (e.message || '') + ' | ' + String(e.stack || '').slice(0, 300));
+
+window.addEventListener('error', (e) => report({ t: 'window.error', m: e.message, f: e.filename }));
+window.addEventListener('unhandledrejection', (e) => report({ t: 'unhandledrejection', m: errStr(e.reason) }));
+
+(async () => {
+  const tAll = performance.now();
+  try {
+    const m = await import('../js/ocr.js');
+    put('import:ok');
+
+    // 确认引擎文件走的是本地，没走 CDN
+    for (const p of ['vendor/tesseract/tesseract.min.js', 'vendor/tessdata/eng.traineddata', 'vendor/tesseract/core/tesseract-core-simd-lstm.wasm']) {
+      const res = await fetch('../' + p);
+      report({ t: 'asset', p, status: res.status });
+      put(p.split('/').pop() + ':' + res.status);
+    }
+
+    for (const c of CASES) {
+      const name = c.name;
+      const t0 = performance.now();
+      const blob = await (await fetch(`./fixtures/${name}.${c.ext}`)).blob();
+      const file = new File([blob], name + '.' + c.ext, { type: c.ext === 'jpg' ? 'image/jpeg' : 'image/png' });
+
+      const out = await m.recognizeRunImage(file, (pct) => put(name + ':' + pct + '%'));
+      const dt = ((performance.now() - t0) / 1000).toFixed(1);
+      put(name + ' done:' + dt + 's');
+
+      const b = (out.parsed && out.parsed.best) || {};
+      report({
+        t: 'result',
+        name,
+        ok: out.ok,
+        seconds: dt,
+        raw: (out.text || '').replace(/\s+/g, ' ').slice(0, 300),
+        distanceKm: b.distanceKm || 0,
+        durationSec: b.durationSec || 0,
+        paceSec: b.paceSec || 0,
+        confidence: b.confidence || 'none',
+        error: out.error || null,
+      });
+    }
+
+    report({ t: 'done', seconds: ((performance.now() - tAll) / 1000).toFixed(1) });
+  } catch (e) {
+    report({ t: 'fatal', m: errStr(e) });
+  }
+})();
+</script>
+</body>
+</html>
