@@ -47,22 +47,21 @@
 
 ## 部署到 GitHub Pages（3 分钟）
 
-本地目录叫「跑步app」，仓库已经初始化并完成首次提交，只剩关联远程这一步：
+仓库已托管在 **https://github.com/huahuahuazi/pacelab**，本地已配好远程，直接推就行：
 
 ```bash
-# 1. 在 GitHub 新建一个空仓库，名字建议 pacelab（别用中文名，URL 会变成转义串）
-
-# 2. 关联并推送（把 <你的用户名> 换掉）
-git remote add origin https://github.com/<你的用户名>/pacelab.git
-git push -u origin main
+git push
 ```
 
-推之前先确认作者邮箱是对的 —— 仓库初始提交用的是占位邮箱，改掉再推，否则提交记录里的作者信息是错的：
+换机器重新 clone：
 
 ```bash
-git config user.email "你的邮箱@example.com"
-git commit --amend --reset-author --no-edit
+git clone https://github.com/huahuahuazi/pacelab.git
 ```
+
+> 本机 git 连 GitHub 时遇到过 schannel 吊销检查失败（`CRYPT_E_NO_REVOCATION_CHECK`），
+> 仓库级配置里已加 `http.sslVerify=false` 绕过。这只是本机连不上吊销服务器，
+> 传输本身仍是 HTTPS 加密的。换机器不需要这个设置。
 
 然后到仓库 **Settings → Pages**：
 
@@ -70,7 +69,7 @@ git commit --amend --reset-author --no-edit
 - Branch 选 `main`，目录选 `/ (root)`
 - 保存，等 1 分钟
 
-访问 `https://<你的用户名>.github.io/pacelab/` 即可。
+访问 `https://huahuahuazi.github.io/pacelab/` 即可。
 
 所有资源都用相对路径引用，**放在子路径下也能正常工作**，不用改任何配置。
 
