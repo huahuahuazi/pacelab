@@ -28,6 +28,9 @@ let state = S.loadState();
 function recompute() {
   stats = C.summarize(state.runs);
   stats.fitness = C.buildFitnessProfile(state.runs, state.profile, stats.currentVdot);
+  // 火柴人：动作来自近 7 天节奏，气泡文案来自状态判断
+  stats.rhythm = C.recentRhythm(state.runs);
+  stats.mood = C.runnerMood(state.runs, stats.fitness.acwr);
 }
 let stats;
 recompute();
@@ -85,16 +88,132 @@ const ICON = {
 
 /* ================= 视图：首页 ================= */
 
+/**
+ * 首页火柴人：动作参数全部来自近 7 天真实数据。
+ *
+ *   步频 → 摆腿周期（120 / cadence 秒走完一个双步）
+ *   步幅 → 摆腿幅度（腿张得越开，步幅越大）
+ *   配速 → 身体前倾角（跑得越快越前倾）
+ *
+ * 用 SMIL（<animateTransform>）而不是 CSS animation：SVG 元素做 CSS 旋转要
+ * 依赖 transform-box / transform-origin 的像素坐标支持，Chrome 60 档的老 WebView
+ * 不一定认。SMIL 从 Chrome 2 就支持，安卓上更稳。
+ *
+ * 周期和幅度都是连续值而不是几档——170 步频和 174 步频动起来确实不一样，
+ * 用户看到的是自己最近一周的样子，不是一套固定动画。
+ */
+function runnerFigure() {
+  const rh = stats.rhythm;
+  const mood = stats.mood;
+  if (!rh || !mood) return '';
+
+  const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
+  // 120 / cadence：一个完整跑步周期是两步（左右各一次落地）
+  const cycle = clamp(120 / rh.cadence, 0.54, 1.05);
+  // 摆幅系数 0.4、区间 20-46：太小看不出在跑，太大腿会甩到 viewBox 外面
+  const swing = clamp(20 + (rh.strideCm - 70) * 0.4, 20, 46);
+  const lean = clamp(3 + (460 - rh.paceSec) * 0.05, 3, 15);
+
+  const tone =
+    { good: 'var(--primary)', warn: 'var(--warn)', calm: 'var(--text-dim)', danger: 'var(--danger)' }[mood.tone] ||
+    'var(--primary)';
+
+  const sub = `近 7 天 · ${rh.count} 次${rh.estimated ? '（估算）' : ''}`;
+
+  // 骨架：脚 y=118，髋 (90,88)，肩 (95,68)，头 (98,60)
+  const legVals = `${swing} 90 88;${-swing} 90 88;${swing} 90 88`;
+  const armVals = `${-swing} 95 68;${swing} 95 68;${-swing} 95 68`;
+
+  return `
+  <svg class="runner-art" viewBox="0 0 150 134" aria-hidden="true">
+    <!-- 速度线：三条错开闪，暗示地面向后掠过 -->
+    <g stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round">
+      <line x1="56" y1="98" x2="82" y2="98" opacity="0.2">
+        <animate attributeName="opacity" values="0.08;0.4;0.08" dur="${cycle * 2}s" repeatCount="indefinite"/>
+      </line>
+      <line x1="50" y1="112" x2="70" y2="112" opacity="0.2">
+        <animate attributeName="opacity" values="0.36;0.07;0.36" dur="${cycle * 2}s" repeatCount="indefinite"/>
+      </line>
+      <line x1="60" y1="126" x2="78" y2="126" opacity="0.2">
+        <animate attributeName="opacity" values="0.12;0.34;0.12" dur="${cycle * 2}s" repeatCount="indefinite"/>
+      </line>
+    </g>
+
+    <!-- 整体上下起伏：每一步落地一次，一个周期起伏两次 -->
+    <g>
+      <animateTransform attributeName="transform" type="translate"
+        values="0 0;0 -2;0 0;0 -2;0 0" keyTimes="0;0.25;0.5;0.75;1"
+        dur="${cycle}s" repeatCount="indefinite"/>
+      <!-- 前倾：绕髋顺时针转，跑得越快转得越多 -->
+      <g transform="rotate(${lean.toFixed(1)} 90 88)">
+        <!-- 后臂（暗） -->
+        <g>
+          <line x1="95" y1="68" x2="101" y2="85" stroke="rgba(22,224,161,0.42)" stroke-width="3.2" stroke-linecap="round"/>
+          <animateTransform attributeName="transform" type="rotate" values="${armVals}"
+            keyTimes="0;0.5;1" calcMode="spline" keySplines="0.42 0 0.58 1;0.42 0 0.58 1"
+            dur="${cycle}s" repeatCount="indefinite" begin="-${(cycle / 2).toFixed(3)}s"/>
+        </g>
+        <!-- 后腿（暗）。单段直线，不拆膝盖 ——
+             试过大小腿两段，折角小了看不出动作、折角大了像腿断了，
+             火柴人这个抽象层级上，干净的钟摆反而更像在跑。 -->
+        <g>
+          <line x1="90" y1="88" x2="90" y2="117" stroke="rgba(22,224,161,0.42)" stroke-width="3.8" stroke-linecap="round"/>
+          <animateTransform attributeName="transform" type="rotate" values="${legVals}"
+            keyTimes="0;0.5;1" calcMode="spline" keySplines="0.42 0 0.58 1;0.42 0 0.58 1"
+            dur="${cycle}s" repeatCount="indefinite" begin="-${(cycle / 2).toFixed(3)}s"/>
+        </g>
+
+        <!-- 躯干 -->
+        <line x1="90" y1="88" x2="95" y2="68" stroke="var(--primary)" stroke-width="4" stroke-linecap="round"/>
+        <!-- 头 -->
+        <circle cx="98" cy="60" r="6.4" fill="var(--primary)" opacity="0.95"/>
+
+        <!-- 前腿（亮） -->
+        <g>
+          <line x1="90" y1="88" x2="90" y2="120" stroke="var(--primary)" stroke-width="3.8" stroke-linecap="round"/>
+          <animateTransform attributeName="transform" type="rotate" values="${legVals}"
+            keyTimes="0;0.5;1" calcMode="spline" keySplines="0.42 0 0.58 1;0.42 0 0.58 1"
+            dur="${cycle}s" repeatCount="indefinite"/>
+        </g>
+        <!-- 前臂（亮） -->
+        <g>
+          <line x1="95" y1="68" x2="103" y2="84" stroke="var(--primary)" stroke-width="3.2" stroke-linecap="round"/>
+          <animateTransform attributeName="transform" type="rotate" values="${armVals}"
+            keyTimes="0;0.5;1" calcMode="spline" keySplines="0.42 0 0.58 1;0.42 0 0.58 1"
+            dur="${cycle}s" repeatCount="indefinite"/>
+        </g>
+      </g>
+    </g>
+
+    <!-- 状态气泡：压在火柴人右上，虚线引线指到头部 -->
+    <g class="mood-bubble" data-act="mood:info">
+      <rect x="8" y="2" width="134" height="38" rx="10"
+        fill="rgba(9,12,14,0.94)" stroke="${tone}" stroke-width="1.2" stroke-opacity="0.75"/>
+      <text x="75" y="17" text-anchor="middle" font-size="8.5" fill="var(--text-faint)" letter-spacing="0.2">${esc(sub)}</text>
+      <text x="75" y="32" text-anchor="middle" font-size="11.5" font-weight="600" fill="${tone}">${esc(mood.text)}</text>
+      <path d="M124 42 Q118 52 104 56" fill="none" stroke="${tone}" stroke-width="1.2"
+        stroke-dasharray="3 3" stroke-opacity="0.8"/>
+      <circle cx="104" cy="56" r="2.6" fill="${tone}">
+        <animate attributeName="r" values="2;3.2;2" dur="2s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+  </svg>`;
+}
+
 function heroCard() {
   if (!stats.count) return '';
   const lv = stats.level;
   return `
   <div class="hero">
-    <div class="label">当前跑步水平</div>
-    <div class="vdot"><b>${stats.currentVdot.toFixed(1)}</b><span>VDOT</span></div>
-    <div class="level-tag ${lv.tier === 'mid' ? 'mid' : ''}">${esc(lv.name)}</div>
-    <p class="desc">${esc(lv.desc)}</p>
-    <div class="meter"><i style="width:${lv.pct.toFixed(1)}%"></i></div>
+    <div class="hero-body">
+      <div class="label">当前跑步水平</div>
+      <div class="vdot"><b>${stats.currentVdot.toFixed(1)}</b><span>VDOT</span></div>
+      <div class="level-tag ${lv.tier === 'mid' ? 'mid' : ''}">${esc(lv.name)}</div>
+      <p class="desc">${esc(lv.desc)}</p>
+      <div class="meter"><i style="width:${lv.pct.toFixed(1)}%"></i></div>
+    </div>
+    ${runnerFigure()}
     <div class="hero-foot">
       <span>本周 <b>${stats.weekKm.toFixed(1)}</b> km</span>
       <span>近30天 <b>${stats.last30Km.toFixed(1)}</b> km</span>
@@ -708,6 +827,7 @@ function modalRender() {
   if (m.type === 'planNew') return modalPlanNew();
   if (m.type === 'done') return modalDone(m.planId, m.dayId);
   if (m.type === 'paceInfo') return modalPaceInfo(m.key);
+  if (m.type === 'moodInfo') return modalMoodInfo();
   if (m.type === 'dayEdit') return modalDayEdit(m.planId, m.dayId);
   if (m.type === 'planCustom') return modalPlanCustom();
   return '';
@@ -807,6 +927,46 @@ function modalPlanCustom() {
         <button class="btn ghost" data-act="modal:close">取消</button>
         <button class="btn primary" data-act="plan:custom-gen">生成空骨架</button>
       </div>
+    </div>
+  </div>`;
+}
+
+/** 点火柴人头顶的气泡：解释这个状态是怎么来的，以及小人为什么这么跑 */
+function modalMoodInfo() {
+  const mood = stats.mood;
+  const rh = stats.rhythm;
+  if (!mood || !rh) return '';
+
+  const tone =
+    { good: 'var(--primary)', warn: 'var(--warn)', calm: 'var(--text-dim)', danger: 'var(--danger)' }[mood.tone] ||
+    'var(--primary)';
+
+  return `
+  <div class="mask" data-act="modal:bg">
+    <div class="sheet">
+      <div class="sheet-grip"></div>
+      <h3>近期跑步状态</h3>
+      <p class="sheet-sub" style="color:${tone};font-weight:600;font-size:15px">${esc(mood.text)}</p>
+
+      <div class="felt-box" style="border-left-color:${tone}">
+        <label style="color:${tone}">为什么是这个状态</label>
+        <p>${esc(mood.detail)}</p>
+      </div>
+
+      <div class="kv-grid">
+        <div><label>近 7 天跑量</label><b>${rh.km} km · ${rh.count} 次</b></div>
+        <div><label>平均配速</label><b>${C.fmtPace(rh.paceSec)} /km</b></div>
+        <div><label>平均步频</label><b>${rh.cadence} 步/分${rh.estimated ? '*' : ''}</b></div>
+        <div><label>平均步幅</label><b>${rh.strideCm} cm</b></div>
+      </div>
+
+      <p class="hint" style="margin:0 0 16px">
+        首页那个小火人的<b>摆腿快慢</b>按步频生成、<b>腿张开的角度</b>按步幅生成、
+        <b>身体前倾</b>按配速生成——它跑的就是你自己最近一周的样子。
+        ${rh.estimated ? '<br>* 没有步频记录，按 170 步/分估算。录入时填上步频，小人会更像你。' : ''}
+      </p>
+
+      <button class="btn ghost" data-act="modal:close">知道了</button>
     </div>
   </div>`;
 }
@@ -1058,6 +1218,12 @@ function handleClick(e) {
       commit();
       render();
       toast('已删除');
+      break;
+    }
+
+    case 'mood:info': {
+      ui.modal = { type: 'moodInfo' };
+      render();
       break;
     }
 

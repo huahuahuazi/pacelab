@@ -181,6 +181,27 @@ main {
 
 /* ---------- 水平主卡 ---------- */
 
+/* 火柴人所在的区域：右上角绝对定位。
+   文字区（.hero-body）只占左侧，右侧给小人留出来 —— 不然 desc 压上去会糊成一片。 */
+.hero-body { position: relative; z-index: 2; }
+/* 注意：这里不能用 margin-right 单独设，会被后面 `.hero .desc { margin: 10px 0 0 }`
+   的简写重置成 0。让位规则统一放在文件末尾，靠层叠顺序生效。 */
+.hero .hero-foot { position: relative; z-index: 2; }
+
+.runner-art {
+  position: absolute;
+  top: 4px;
+  right: 0;
+  width: 166px;
+  height: 148px;
+  z-index: 1;
+  pointer-events: none;
+  /* 淡绿光晕，让绿线条在深色卡片上"亮"起来而不是浮着 */
+  filter: drop-shadow(0 0 10px rgba(22, 224, 161, 0.28));
+}
+.runner-art .mood-bubble { pointer-events: auto; cursor: pointer; }
+.runner-art .mood-bubble:active { opacity: 0.7; }
+
 .hero {
   position: relative;
   overflow: hidden;
@@ -1128,3 +1149,10 @@ select.input {
   font-size: 12px;
   border-radius: var(--radius-sm);
 }
+
+/* ---------------- 火柴人的让位规则 ----------------
+   放在最后是因为 .hero .desc 前面用了 margin 简写，会把 margin-right 重置掉。
+   同样的优先级下，后出现的规则获胜 —— 与其去改前面的简写（容易影响别处），
+   不如在这里统一收口。 */
+.hero .desc { margin-right: 134px; }
+.hero .meter { margin-right: 134px; }

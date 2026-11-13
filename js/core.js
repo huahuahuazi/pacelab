@@ -314,14 +314,18 @@ export function paceName(key) {
  *   速度 = 1000 / pace (m/s)，步频 = cadence / 60 (步/秒)
  *   → 步幅(m) = (1000 / pace) / (cadence / 60) = 60000 / (pace × cadence)
  *
- * 实测校验：312s/km + 174spm → 60000/(312×174) = 110 厘米，符合业余跑者实际。
+ * 注意这个公式出来的是**米**，要 ×100 才是厘米。第一版漏了这一步，
+ * 结果 312s/km + 174spm 算出「步幅 1 厘米」—— 除以 100 的错，肉眼一看就知道，
+ * 但只有真的把数字显示出来才会发现。
+ *
+ * 实测校验：312s/km + 174spm → 60000/54288 = 1.105 m = 111 厘米，符合业余跑者实际。
  * 意义在于用户只填配速和步频，第三个数自动出来 —— 少填一格就少一个填错的机会。
  */
 export function strideFromPace(paceSecPerKm, cadenceSpm) {
   const p = Number(paceSecPerKm);
   const c = Number(cadenceSpm);
   if (!(p > 0) || !(c > 0)) return 0;
-  return Math.round(60000 / (p * c));
+  return Math.round((60000 / (p * c)) * 100);
 }
 
 /**
@@ -582,7 +586,7 @@ function cadenceScore(runs) {
   // 跨大步判定：步频偏低 + 步幅明显大于同配速下的合理值
   const r = withCad[0];
   const pace = r.durationSec / r.distanceKm;
-  const idealStride = pace > 0 ? Math.round(60000 / (pace * 170)) : 0; // 按 170 步频应有的步幅
+  const idealStride = pace > 0 ? Math.round((60000 / (pace * 170)) * 100) : 0; // 按 170 步频应有的步幅（厘米）
   const overstride = !!(r.strideCm && idealStride && r.strideCm > idealStride * 1.12 && avg < 165);
   if (overstride) score = Math.min(score, 55);
 
@@ -728,6 +732,8 @@ export function buildFitnessProfile(runs, profile, vdot) {
     overallScore,
     overallLabel: scoreLabel(overallScore),
     items,
+    // 单独暴露 ACWR：火柴人的状态判断要用，不该让调用方去 items 里解析字符串
+    acwr: load.acwr,
     hrZones: hrZones,
     paces: paces,
     paceRanges: paceRanges(paces),
@@ -735,4 +741,156 @@ export function buildFitnessProfile(runs, profile, vdot) {
     // 数据够不够支撑结论，界面要据此提示"多填几项才准"
     reliable: known >= 3,
   };
+}
+
+/* ---------------- 近 7 天节奏（火柴人动画的数据源） ---------------- */
+
+/**
+ * 用户最近一周的跑步节奏。
+ *
+ * 这个结果直接驱动首页火柴人的动作：周期来自步频、摆幅来自步幅、前倾来自配速。
+ * 也就是说 —— 动画里的那个小人，跑的就是他自己最近一周的样子，不是随便动的。
+ *
+ * 步频/步幅按**距离加权**平均，不按次数：一次 15km 长距离和一次 3km 恢复跑，
+ * 对"我平时怎么跑"的代表性显然不一样。
+ *
+ * 没有步频数据时不硬编一个数就走 —— 按 170 步/分估算并把 estimated 标出来，
+ * 界面要告诉用户这一部分是估的。
+ */
+export function recentRhythm(runs) {
+  const now = Date.now();
+  const day = 86400000;
+  const week = (runs || []).filter((r) => {
+    const t = new Date(r.date).getTime();
+    return now - t <= 7 * day && Number(r.distanceKm) > 0 && Number(r.durationSec) > 0;
+  });
+  if (!week.length) return null;
+
+  const km = week.reduce((s, r) => s + Number(r.distanceKm), 0);
+  const sec = week.reduce((s, r) => s + Number(r.durationSec), 0);
+  if (!(km > 0)) return null;
+  const pace = sec / km;
+
+  const withCad = week.filter((r) => Number(r.cadence) > 0);
+  const cadKm = withCad.reduce((s, r) => s + Number(r.distanceKm), 0);
+  let cadence = cadKm > 0 ? withCad.reduce((s, r) => s + Number(r.cadence) * Number(r.distanceKm), 0) / cadKm : 0;
+
+  let estimated = false;
+  if (!(cadence > 0)) {
+    cadence = 170; // 业余跑者最常见的中位步频
+    estimated = true;
+  }
+
+  const withStride = week.filter((r) => Number(r.strideCm) > 0);
+  const sKm = withStride.reduce((s, r) => s + Number(r.distanceKm), 0);
+  let strideCm = sKm > 0 ? withStride.reduce((s, r) => s + Number(r.strideCm) * Number(r.distanceKm), 0) / sKm : 0;
+  if (!(strideCm > 0)) {
+    // 步幅 = 60000 ÷ (配速秒数 × 步频) 得到米，×100 转厘米
+    strideCm = (60000 / (pace * cadence)) * 100;
+  }
+
+  return {
+    km: Math.round(km * 10) / 10,
+    paceSec: Math.round(pace),
+    cadence: Math.round(cadence),
+    strideCm: Math.round(strideCm),
+    count: week.length,
+    estimated: estimated,
+  };
+}
+
+/**
+ * 近 7 天状态判断。给火柴人气泡用的一句话。
+ *
+ * 只看三个能直接从数据算出来的信号，不做玄学推断：
+ *   1) 负荷：ACWR（近 7 天 ÷ 近 28 天周均），1.0-1.3 是安全爬升区
+ *   2) 频率：这一周跑了几次
+ *   3) 配速趋势：近 7 天 vs 之前两周
+ *
+ * 配速趋势只在两次都有足够样本时才比，否则噪音大于信号。
+ */
+export function runnerMood(runs, acwr) {
+  const now = Date.now();
+  const day = 86400000;
+  const list = (runs || []).filter((r) => Number(r.distanceKm) > 0 && Number(r.durationSec) > 0);
+
+  const recent = list.filter((r) => now - new Date(r.date).getTime() <= 7 * day);
+  if (!recent.length) {
+    return { key: 'idle', text: '最近没跑', tone: 'calm', detail: '近 7 天没有记录，节奏断了。先跑一次轻松跑接回来。' };
+  }
+  if (recent.length === 1) {
+    return {
+      key: 'start',
+      text: '刚回到跑道',
+      tone: 'calm',
+      detail: '近 7 天只有 1 次记录。先把频率稳住，比单次跑多远更重要。',
+    };
+  }
+
+  const prior = list.filter((r) => {
+    const t = now - new Date(r.date).getTime();
+    return t > 7 * day && t <= 21 * day;
+  });
+
+  const paceOf = (arr) => {
+    const km = arr.reduce((s, r) => s + Number(r.distanceKm), 0);
+    const sec = arr.reduce((s, r) => s + Number(r.durationSec), 0);
+    return km > 0 ? sec / km : 0;
+  };
+  const pRecent = paceOf(recent);
+  const pPrior = prior.length >= 2 ? paceOf(prior) : 0;
+  // 只在两边都有足够样本时比较配速，否则一点噪音就会得出"提速了"的假结论
+  const delta = pRecent > 0 && pPrior > 0 ? (pPrior - pRecent) / pPrior : 0;
+
+  const a = Number(acwr) || 0;
+
+  if (a > 1.5) {
+    return {
+      key: 'overload',
+      text: '这周加量偏猛',
+      tone: 'warn',
+      detail: `急慢性负荷比 ${a.toFixed(2)}，超过 1.5 就是伤病高发区。这周该把量压回去了。`,
+    };
+  }
+  if (a >= 1.3) {
+    return {
+      key: 'building',
+      text: '量在往上加',
+      tone: 'good',
+      detail: `负荷比 ${a.toFixed(2)}，还在安全区间的上沿。保持这个节奏，别再跳一档。`,
+    };
+  }
+  if (a >= 0.8) {
+    if (delta > 0.04) {
+      return {
+        key: 'progress',
+        text: '状态在回升',
+        tone: 'good',
+        detail: `负荷比 ${a.toFixed(2)} 稳定，同周配速比之前快了 ${Math.round(delta * 100)}%。`,
+      };
+    }
+    if (delta < -0.04) {
+      return {
+        key: 'fatigue',
+        text: '配速有点掉',
+        tone: 'warn',
+        detail: `负荷稳定但配速比之前慢 ${Math.round(-delta * 100)}%，常见于疲劳累积或天气变热，先看看睡眠。`,
+      };
+    }
+    return {
+      key: 'steady',
+      text: '节奏挺稳',
+      tone: 'good',
+      detail: `负荷比 ${a.toFixed(2)}，加量和恢复平衡得不错，按这个节奏推进就行。`,
+    };
+  }
+  if (a > 0) {
+    return {
+      key: 'taper',
+      text: '正在减量',
+      tone: 'calm',
+      detail: `负荷比 ${a.toFixed(2)}，比平时少。如果是主动减量，很好；如果不是，把频率找回。`,
+    };
+  }
+  return { key: 'unknown', text: '数据还不够', tone: 'calm', detail: '记录再多一些，才能看出近期状态。' };
 }
