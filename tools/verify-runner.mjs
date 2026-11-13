@@ -91,12 +91,11 @@ const check = (ok, msg, extra) => { if (!ok) bad++; console.log(`  ${ok ? 'PASS'
     var s=document.querySelector('.runner-art');
     if(!s) return null;
     var r=s.getBoundingClientRect();
-    var anims=document.querySelectorAll('.runner-art animateTransform, .runner-art animate');
-    var first=document.querySelector('.runner-art animateTransform');
+    var fig=s.querySelector('.fig');
     return {
       box:{x:r.x,y:r.y,w:r.width,h:r.height},
-      animCount: anims.length,
-      dur: first ? first.getAttribute('dur') : null,
+      limbs: s.querySelectorAll('.fig line').length,
+      figTransform: fig ? fig.getAttribute('transform') : null,
       inCard: (function(){
         var card=document.querySelector('.hero').getBoundingClientRect();
         return r.bottom <= card.bottom + 1 && r.right <= card.right + 1;
@@ -106,10 +105,22 @@ const check = (ok, msg, extra) => { if (!ok) bad++; console.log(`  ${ok ? 'PASS'
 
   check(!!info, '页面里有火柴人 .runner-art');
   if (info) {
-    check(info.animCount > 0, 'SVG 里有 SMIL 动画节点', info.animCount + ' 个');
-    check(!!info.dur, '动画周期已设置', info.dur);
+    // 多关节：躯干 + 2 大腿 + 2 小腿 + 2 上臂 + 2 前臂 = 9 条线段
+    check(info.limbs >= 9, '骨架是 9 段线（多关节，不是单根棍）', info.limbs + ' 段');
+    check(!!info.figTransform && /rotate/.test(info.figTransform), '整体带前倾旋转', info.figTransform);
     check(info.inCard, '火柴人完整落在卡片内（没被裁）', `box ${Math.round(info.box.w)}x${Math.round(info.box.h)}`);
   }
+
+  // 关节坐标必须逐帧变化 —— 这才能证明 JS 驱动的动画真的在跑。
+  // 之前用 SMIL 时靠 animateTransform 节点数判断，现在改成看实际坐标。
+  const coordA = await evaluate(
+    `['.l-f-thigh','.l-f-shin','.a-f-fore'].map(function(s){var n=document.querySelector(s);return n?n.getAttribute('x2')+','+n.getAttribute('y2'):'-'}).join('|')`
+  );
+  await wait(320);
+  const coordB = await evaluate(
+    `['.l-f-thigh','.l-f-shin','.a-f-fore'].map(function(s){var n=document.querySelector(s);return n?n.getAttribute('x2')+','+n.getAttribute('y2'):'-'}).join('|')`
+  );
+  check(coordA !== coordB && coordA !== '—', '膝关节与肘关节坐标在变（逐帧驱动生效）', coordA + ' → ' + coordB);
 
   // 隔一小段时间截两次同一区域，比像素
   const clip = { x: info.box.x, y: info.box.y, width: info.box.w, height: info.box.h, scale: 2 };
@@ -120,7 +131,6 @@ const check = (ok, msg, extra) => { if (!ok) bad++; console.log(`  ${ok ? 'PASS'
   const h2 = crypto.createHash('md5').update(shotB).digest('hex');
   check(h1 !== h2, '两个时间点画面不同 → 动画在跑', h1.slice(0, 8) + ' vs ' + h2.slice(0, 8));
 
-  // 周期是否与步频对应：cycle = 120 / cadence
   const rh = await evaluate(`(function(){
     var t=localStorage.getItem('pacelab.state.v1');
     return t ? 'ok' : 'none';

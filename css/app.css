@@ -192,8 +192,8 @@ main {
   position: absolute;
   top: 4px;
   right: 0;
-  width: 166px;
-  height: 148px;
+  width: 178px;
+  height: 159px;
   z-index: 1;
   pointer-events: none;
   /* 淡绿光晕，让绿线条在深色卡片上"亮"起来而不是浮着 */
@@ -1154,5 +1154,5 @@ select.input {
    放在最后是因为 .hero .desc 前面用了 margin 简写，会把 margin-right 重置掉。
    同样的优先级下，后出现的规则获胜 —— 与其去改前面的简写（容易影响别处），
    不如在这里统一收口。 */
-.hero .desc { margin-right: 134px; }
-.hero .meter { margin-right: 134px; }
+.hero .desc { margin-right: 146px; }
+.hero .meter { margin-right: 146px; }

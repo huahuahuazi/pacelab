@@ -3,15 +3,25 @@
   <!-- 外圈跑道：底色环 + 一段高亮，暗示配速与进度 -->
   <circle cx="256" cy="256" r="196" fill="none" stroke="#1c242c" stroke-width="16"/>
   <path d="M256 60 A196 196 0 0 1 426 356" fill="none" stroke="#16e0a1" stroke-width="16" stroke-linecap="round" opacity="0.9"/>
-  <!-- 跑者剪影 -->
-  <g stroke="#16e0a1" stroke-width="23" stroke-linecap="round" stroke-linejoin="round" fill="none">
-    <circle cx="303" cy="168" r="27" fill="#16e0a1" stroke="none"/>
-    <path d="M291 208 L251 272"/>
-    <path d="M291 224 L338 268"/>
-    <path d="M291 224 L238 198"/>
-    <path d="M251 272 L304 320"/>
-    <path d="M304 320 L286 386"/>
-    <path d="M251 272 L194 322"/>
-    <path d="M194 322 L222 380"/>
+
+  <!-- 跑者：前倾冲刺姿态，四肢多关节（肘弯、膝弯）。
+       绘制顺序 = 远侧肢体 → 躯干 → 近侧肢体，近侧压在上面才有前后层次。 -->
+  <g stroke="#16e0a1" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <!-- 后臂：肩 → 肘（向后下）→ 手（向上收回） -->
+    <path d="M302 202 L258 234 L228 192" stroke-opacity="0.55"/>
+    <!-- 后腿：髋 → 膝（向后下）→ 脚（向前收回，露出弯膝） -->
+    <path d="M260 272 L218 326 L252 366" stroke-opacity="0.55"/>
+
+    <!-- 躯干：髋 → 肩，明显前倾 -->
+    <path d="M260 272 L302 202"/>
+
+    <!-- 头 -->
+    <circle cx="326" cy="172" r="27" fill="#16e0a1" stroke="none"/>
+
+    <!-- 前腿：髋 → 膝 → 脚，支撑相接近伸直 -->
+    <path d="M260 272 L296 322 L306 374"/>
+
+    <!-- 前臂：肩 → 肘（向前下）→ 手（回到胸前） -->
+    <path d="M302 202 L346 234 L316 276"/>
   </g>
 </svg>

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- 安卓自适应图标的前景层：透明背景，只有跑道环 + 跑者。
+       内容整体缩到 0.66 —— 自适应图标的安全区是中间 72/108，
+       超出部分会被各家 ROM 的遮罩裁掉，缩小才能保证任何形状都不缺角。 -->
+  <g transform="translate(256 256) scale(0.66) translate(-256 -256)">
+    <circle cx="256" cy="256" r="196" fill="none" stroke="#1c242c" stroke-width="16"/>
+    <path d="M256 60 A196 196 0 0 1 426 356" fill="none" stroke="#16e0a1" stroke-width="16" stroke-linecap="round" opacity="0.9"/>
+
+    <g stroke="#16e0a1" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" fill="none">
+      <path d="M302 202 L258 234 L228 192" stroke-opacity="0.55"/>
+      <path d="M260 272 L218 326 L252 366" stroke-opacity="0.55"/>
+      <path d="M260 272 L302 202"/>
+      <circle cx="326" cy="172" r="27" fill="#16e0a1" stroke="none"/>
+      <path d="M260 272 L296 322 L306 374"/>
+      <path d="M302 202 L346 234 L316 276"/>
+    </g>
+  </g>
+</svg>
