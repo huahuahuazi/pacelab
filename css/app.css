@@ -218,7 +218,8 @@ main {
   opacity: 0;
   transform: translateY(var(--dy, 0));
 }
-.runner-frames .rf.on { opacity: 1; }
+/* 透明度由 JS 按相位实时写入，不再用 .on 类切换 */
+.runner-frames .rf { will-change: opacity, filter; }
 
 /* 跑道：一条两端淡出的地面线。脚踩在它上面，
    人就在路上跑而不是在半空浮着。 */

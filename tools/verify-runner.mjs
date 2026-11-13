@@ -109,16 +109,20 @@ const check = (ok, msg, extra) => { if (!ok) bad++; console.log(`  ${ok ? 'PASS'
 
   // 关节坐标必须逐帧变化 —— 这才能证明 JS 驱动的动画真的在跑。
   // 之前用 SMIL 时靠 animateTransform 节点数判断，现在改成看实际坐标。
-  const curFrame = async () =>
-    evaluate(`(function(){
-      var on=document.querySelector('.runner-frames img.on');
-      var all=Array.prototype.slice.call(document.querySelectorAll('.runner-frames img'));
-      return on ? all.indexOf(on) : -1;
-    })()`);
-  const fA = await curFrame();
-  await wait(360);
-  const fB = await curFrame();
-  check(fA !== fB && fA >= 0, '当前显示帧在推进（序列帧动画生效）', `第 ${fA + 1} 帧 → 第 ${fB + 1} 帧`);
+  // 插值验证：任意时刻应该有两帧同时可见、透明度互补，且随时间连续变化。
+  // 硬切换的话，某一时刻只会有一个 opacity=1，另一个是 0。
+  const ops = async () =>
+    evaluate(`Array.prototype.slice.call(document.querySelectorAll('.runner-frames img'))
+      .map(function(i){return parseFloat(i.style.opacity||'0')})`);
+  const oA = await ops();
+  await wait(260);
+  const oB = await ops();
+  const visA = oA.filter(function (v) { return v > 0.02; }).length;
+  const midA = oA.filter(function (v) { return v > 0.05 && v < 0.95; }).length;
+  const sumA = oA.reduce(function (s, v) { return s + v; }, 0);
+  check(visA >= 2, '同时有两帧在画面里（不是硬切）', visA + ' 帧可见');
+  check(sumA > 0.9 && sumA < 1.1, '两帧透明度互补相加约等于 1', sumA.toFixed(3));
+  check(oA.join(',') !== oB.join(','), '透明度随时间连续变化（插值生效）', midA + ' 帧处于中间态');
 
   // 隔一小段时间截两次同一区域，比像素
   const clip = { x: info.box.x, y: info.box.y, width: info.box.w, height: info.box.h, scale: 2 };

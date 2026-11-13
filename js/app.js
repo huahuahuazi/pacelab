@@ -172,7 +172,7 @@ function runnerFigure() {
   const DY = [0.0, 2.4, 2.4, 7.9, 9.7, 9.7, 9.7, 12.2, 12.2];
   let frames = '';
   for (let i = 1; i <= 9; i++) {
-    frames += `<img class="rf${i === 1 ? ' on' : ''}" style="--dy:${DY[i - 1]}px" src="assets/runner/f${i}.png" alt="" draggable="false">`;
+    frames += `<img class="rf" style="--dy:${DY[i - 1]}px" src="assets/runner/f${i}.png" alt="" draggable="false">`;
   }
 
   return `
@@ -197,7 +197,20 @@ function runnerFigure() {
 
 var runnerRAF = 0;
 
-/** 按步频切帧。render() 之后调用；页面切走时靠 contains 检查自然停下。 */
+/**
+ * 按相位做时间插值，而不是硬切 9 张图。
+ *
+ * 做法：任意时刻算出连续相位 phase ∈ [0, 9)，落在第 i 帧和第 i+1 帧之间，
+ * 两帧同时显示、透明度互补（1-t 和 t），再叠一点随过渡强度变化的模糊。
+ * 这样每一时刻的画面都是新合成的，不存在「这一帧」的概念，肉眼看到的是连续运动。
+ *
+ * 关于 120fps：插值是按**时间**连续计算的，不依赖帧计数。
+ * 屏幕刷新率多高，实际就渲染多少帧 —— 120Hz 屏上就是 120fps，
+ * 60Hz 屏上每一帧也都是不同的插值结果，不会退化成 9 张图轮播。
+ *
+ * 模糊的作用：两帧叠加本来会看成「双影」，加一点动态模糊之后，
+ * 更像快门拖影，反而成了运动感。模糊量随 t 走（中间最糊、两端最清）。
+ */
 function startRunnerAnim() {
   if (runnerRAF) cancelAnimationFrame(runnerRAF);
   runnerRAF = 0;
@@ -207,27 +220,52 @@ function startRunnerAnim() {
   if (!wrap || !rh) return;
 
   const imgs = wrap.querySelectorAll('img');
-  if (!imgs.length) return;
+  const N = imgs.length;
+  if (!N) return;
 
   const cadence = Math.min(210, Math.max(120, Number(rh.cadence) || 170));
-  const cycle = 120 / cadence;
-  const perFrame = (cycle * 1000) / imgs.length;
+  const cycleMs = (120 / cadence) * 1000;
+  const t0 = performance.now();
 
-  let idx = 0;
-  let last = performance.now();
+  let lastI = -1;
+  let lastJ = -1;
 
   const tick = (now) => {
     if (!document.body.contains(wrap)) {
       runnerRAF = 0;
       return;
     }
-    if (now - last >= perFrame) {
-      // 用取模对齐时间基准，避免 rAF 抖动累积成肉眼可见的速度漂移
-      last = now - ((now - last) % perFrame);
-      imgs[idx].classList.remove('on');
-      idx = (idx + 1) % imgs.length;
-      imgs[idx].classList.add('on');
+
+    // 连续相位：0 → N 循环。
+    // Math.max(0, ...) 不能省：rAF 回调拿到的时间戳是「这一帧开始的时刻」，
+    // 可能早于我们在启动时记的 t0，第一个回调就会算出负数相位，
+    // 进而让 Math.floor 得到 -1，imgs[-1] 直接 undefined 报错。
+    const elapsed = Math.max(0, now - t0);
+    const phase = ((elapsed / cycleMs) * N) % N;
+    const i = Math.floor(phase);
+    const t = phase - i;
+    const j = (i + 1) % N;
+
+    // 全程插值，不留「纯帧」时间片 —— 留了就会在那一小段退化成硬切。
+    // smoothstep 本身端点导数为 0，两端自然放慢，落脚那一下依然是「踩点」的，
+    // 不需要额外靠停顿来做。
+    const blend = t * t * (3 - 2 * t);
+
+    if (i !== lastI || j !== lastJ) {
+      for (let k = 0; k < N; k++) {
+        if (k !== i && k !== j) imgs[k].style.opacity = '0';
+      }
+      lastI = i;
+      lastJ = j;
     }
+    imgs[i].style.opacity = (1 - blend).toFixed(3);
+    imgs[j].style.opacity = blend.toFixed(3);
+
+    // 只有过渡中间才需要模糊，落在纯帧上时保持清晰
+    const b = Math.sin(t * Math.PI) * 0.7;
+    imgs[i].style.filter = b > 0.05 ? `blur(${b.toFixed(2)}px)` : 'none';
+    imgs[j].style.filter = b > 0.05 ? `blur(${b.toFixed(2)}px)` : 'none';
+
     runnerRAF = requestAnimationFrame(tick);
   };
 
