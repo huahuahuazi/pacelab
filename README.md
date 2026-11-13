@@ -94,6 +94,10 @@ cd android
 
 完整步骤、环境变量、常见报错见 **[docs/安卓打包.md](docs/安卓打包.md)**。
 
+**动手改代码之前先读 [docs/开发记录.md](docs/开发记录.md)** —— 里面记着每个技术选型否掉了什么、
+以及踩过的坑（事件传播、`display:none` 的 file input、千分位当小数、日期当用时……）。
+很多坑踩第二次的代价比读一次文档高得多。
+
 > 没配签名密钥也能构建：会自动退回 debug 签名，照样能装能跑。
 > 要自己发版，按文档生成一个 keystore 放进 `android/keystore.properties` 即可。
 
@@ -127,7 +131,9 @@ cd android
 │   ├── verify-ocr.mjs      端到端识别验证（起无头浏览器真跑）
 │   ├── verify-upload.mjs   端到端上传链路验证
 │   └── fixtures/           验证用截图（英文结果页 / 中文深色主题）
-├── docs/安卓打包.md          打包与安装说明
+├── docs/
+│   ├── 安卓打包.md           打包与安装说明
+│   └── 开发记录.md           决策与踩坑记录（改代码前先看）
 └── assets/                 图标与截图
 ```
 
