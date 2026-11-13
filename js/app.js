@@ -35,6 +35,16 @@ function recompute() {
 let stats;
 recompute();
 
+// 预热火柴人的 9 张序列帧：提前解码，切帧时才不会闪白。
+// 用 typeof 判断而不是直接 new Image()：单测在 node 里跑，没有这个构造函数，
+// 模块顶层一碰就抛错，整个测试文件跟着挂。
+if (typeof Image !== 'undefined') {
+  for (let i = 1; i <= 9; i++) {
+    const im = new Image();
+    im.src = `assets/runner/f${i}.png`;
+  }
+}
+
 const ui = { tab: 'home', modal: null, ocr: null, planWeeks: 4, planFilter: 'all' };
 
 // 支持 index.html#plan 直接打开某个 tab。
@@ -100,161 +110,16 @@ const ICON = {
  * "绕一个点旋转"，拼不出膝盖向后折成 V 字这种形状（试过，折角小了像走路、
  * 折角大了像腿断）。这里每帧重算 6 个关节坐标、10 条线段，开销可以忽略。
  */
-function runnerFigure() {
-  const rh = stats.rhythm;
-  const mood = stats.mood;
-  if (!rh || !mood) return '';
-
-  const tone =
-    { good: 'var(--primary)', warn: 'var(--warn)', calm: 'var(--text-dim)', danger: 'var(--danger)' }[mood.tone] ||
-    'var(--primary)';
-
-  const sub = `近 7 天 · ${rh.count} 次${rh.estimated ? '（估算）' : ''}`;
-  const back = 'rgba(22,224,161,0.42)';
-
-  return `
-  <svg class="runner-art" viewBox="0 0 150 134" aria-hidden="true">
-    <!-- 骨架：所有坐标由 startRunnerAnim() 每帧重算 -->
-    <g class="fig">
-      <!-- 后臂（暗） -->
-      <line class="a-b-up" stroke="${back}" stroke-width="3.2" stroke-linecap="round"/>
-      <line class="a-b-fore" stroke="${back}" stroke-width="3.2" stroke-linecap="round"/>
-      <!-- 后腿（暗） -->
-      <line class="l-b-thigh" stroke="${back}" stroke-width="3.8" stroke-linecap="round"/>
-      <line class="l-b-shin" stroke="${back}" stroke-width="3.4" stroke-linecap="round"/>
-
-      <!-- 躯干 + 头 -->
-      <line class="spine" stroke="var(--primary)" stroke-width="4.2" stroke-linecap="round"/>
-      <circle class="head" r="8" fill="var(--primary)"/>
-
-      <!-- 前腿（亮） -->
-      <line class="l-f-thigh" stroke="var(--primary)" stroke-width="3.8" stroke-linecap="round"/>
-      <line class="l-f-shin" stroke="var(--primary)" stroke-width="3.4" stroke-linecap="round"/>
-      <!-- 前臂（亮） -->
-      <line class="a-f-up" stroke="var(--primary)" stroke-width="3.2" stroke-linecap="round"/>
-      <line class="a-f-fore" stroke="var(--primary)" stroke-width="3.2" stroke-linecap="round"/>
-    </g>
-
-    <!-- 状态气泡：压在火柴人右上，虚线引线指到头部 -->
-    <g class="mood-bubble" data-act="mood:info">
-      <rect x="8" y="2" width="134" height="38" rx="10"
-        fill="rgba(9,12,14,0.94)" stroke="${tone}" stroke-width="1.2" stroke-opacity="0.75"/>
-      <text x="75" y="17" text-anchor="middle" font-size="8.5" fill="var(--text-faint)" letter-spacing="0.2">${esc(sub)}</text>
-      <text x="75" y="32" text-anchor="middle" font-size="11.5" font-weight="600" fill="${tone}">${esc(mood.text)}</text>
-      <path d="M124 42 Q118 50 104 54" fill="none" stroke="${tone}" stroke-width="1.2"
-        stroke-dasharray="3 3" stroke-opacity="0.8"/>
-      <circle cx="104" cy="54" r="2.6" fill="${tone}">
-        <animate attributeName="r" values="2;3.2;2" dur="2s" repeatCount="indefinite"/>
-      </circle>
-    </g>
-  </svg>`;
-}
-
-let runnerRAF = 0;
-
-/** 逐帧驱动火柴人。render() 之后调用；页面切走时靠 contains 检查自然停下。 */
-function startRunnerAnim() {
-  if (runnerRAF) cancelAnimationFrame(runnerRAF);
-  runnerRAF = 0;
-
-  const svg = document.querySelector('.runner-art');
-  const rh = stats.rhythm;
-  if (!svg || !rh) return;
-
-  const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
-
-  const cycle = clamp(120 / rh.cadence, 0.54, 1.05);
-  const swing = (clamp(22 + (rh.strideCm - 70) * 0.42, 22, 48) * Math.PI) / 180;
-  // 前倾给到 8–24 度：低于 8 度看着像走路，超过 24 度开始像摔倒
-  const lean = clamp(8 + (480 - rh.paceSec) * 0.06, 8, 24);
-
-  const q = (s) => svg.querySelector(s);
-  const fig = q('.fig');
-  const spine = q('.spine');
-  const head = q('.head');
-  const nodes = {
-    lfT: q('.l-f-thigh'), lfS: q('.l-f-shin'),
-    lbT: q('.l-b-thigh'), lbS: q('.l-b-shin'),
-    afU: q('.a-f-up'), afF: q('.a-f-fore'),
-    abU: q('.a-b-up'), abF: q('.a-b-fore'),
-  };
-  if (!fig || !spine || !head) return;
-
-  // 骨架尺寸（viewBox 150×134）。髋是全身的根，头/肩/腿都相对它算。
-  const HIP = { x: 88, y: 94 };
-  const L1 = 20; // 大腿
-  const L2 = 16; // 小腿
-  const SH = { x: 88, y: 68 };
-  const U1 = 13; // 上臂
-  const U2 = 13; // 前臂
-  const HEAD = { x: 88, y: 56 };
-
-  const line = (n, x1, y1, x2, y2) => {
-    if (!n) return;
-    n.setAttribute('x1', x1.toFixed(1));
-    n.setAttribute('y1', y1.toFixed(1));
-    n.setAttribute('x2', x2.toFixed(1));
-    n.setAttribute('y2', y2.toFixed(1));
-  };
-
-  /**
-   * 一条腿。p 是相位：
-   *   cos(p)>0 → 大腿在前（脚落地），cos(p)<0 → 大腿在后（蹬地结束）
-   *   sin(p)<0 → 摆动相，此时膝盖后折（这是跑步最显著的视觉特征）
-   */
-  const leg = (p, thigh, shin) => {
-    const a1 = swing * Math.cos(p);
-    const knee = 0.2 + 0.82 * Math.max(0, -Math.sin(p));
-    const kx = HIP.x + L1 * Math.sin(a1);
-    const ky = HIP.y + L1 * Math.cos(a1);
-    const a2 = a1 - knee;
-    line(thigh, HIP.x, HIP.y, kx, ky);
-    line(shin, kx, ky, kx + L2 * Math.sin(a2), ky + L2 * Math.cos(a2));
-  };
-
-  /** 一条臂。跑步时手臂始终保持弯曲，这是姿态像不像的关键。 */
-  const arm = (p, up, fore) => {
-    const a1 = -0.55 * swing * Math.cos(p);
-    const ELBOW = 1.2;
-    const ex = SH.x + U1 * Math.sin(a1);
-    const ey = SH.y + U1 * Math.cos(a1);
-    const a2 = a1 + ELBOW;
-    line(up, SH.x, SH.y, ex, ey);
-    line(fore, ex, ey, ex + U2 * Math.sin(a2), ey + U2 * Math.cos(a2));
-  };
-
-  const t0 = performance.now();
-
-  const frame = (now) => {
-    // 重渲染会把节点整个换掉，这里检测到就停，避免对已删除的节点做无用功
-    if (!document.body.contains(svg)) {
-      runnerRAF = 0;
-      return;
-    }
-    const ph = (((now - t0) / 1000) / cycle) * Math.PI * 2;
-
-    // 每落地一步身体下沉一次，所以是一个周期两次
-    const bob = -1.4 * Math.abs(Math.sin(ph));
-    fig.setAttribute(
-      'transform',
-      `translate(0 ${bob.toFixed(2)}) rotate(${lean.toFixed(1)} ${HIP.x} ${HIP.y})`
-    );
-
-    line(spine, HIP.x, HIP.y, SH.x, SH.y);
-    head.setAttribute('cx', HEAD.x);
-    head.setAttribute('cy', HEAD.y);
-
-    leg(ph, nodes.lfT, nodes.lfS);
-    leg(ph + Math.PI, nodes.lbT, nodes.lbS);
-    arm(ph + Math.PI, nodes.afU, nodes.afF);
-    arm(ph, nodes.abU, nodes.abF);
-
-    runnerRAF = requestAnimationFrame(frame);
-  };
-
-  frame(t0);
-}
-
+/**
+ * 火柴人：直接用视频里抠出来的 9 帧序列图。
+ *
+ * 为什么不再手画骨架：我按"看图估角度"的方式画过两版，都被判定不像 ——
+ * 火柴人跑步的关节关系比想象中微妙，差 10 度就是"跨大步"和"小碎步"的区别。
+ * 既然用户给了权威动作参考，就用像素级的复刻，把"我理解的姿势"这个变量彻底去掉。
+ *
+ * 数据驱动保留在速度上：一个完整循环 = 120 / 步频 秒，9 帧均分。
+ * 步频 174 和 168 播放速度确实不同，这个仍然是用户自己的节奏。
+ */
 function heroCard() {
   if (!stats.count) return '';
   const lv = stats.level;
@@ -289,6 +154,80 @@ function predGrid() {
       </div>`
     ).join('')}
   </div>`;
+}
+
+function runnerFigure() {
+  const rh = stats.rhythm;
+  const mood = stats.mood;
+  if (!rh || !mood) return '';
+
+  const tone =
+    { good: 'var(--primary)', warn: 'var(--warn)', calm: 'var(--text-dim)', danger: 'var(--danger)' }[mood.tone] ||
+    'var(--primary)';
+
+  const sub = `近 7 天 · ${rh.count} 次${rh.estimated ? '（估算）' : ''}`;
+
+  let frames = '';
+  for (let i = 1; i <= 9; i++) {
+    frames += `<img class="rf${i === 1 ? ' on' : ''}" src="assets/runner/f${i}.png" alt="" draggable="false">`;
+  }
+
+  return `
+  <div class="runner-art">
+    <div class="runner-frames">${frames}</div>
+    <svg class="mood-layer" viewBox="0 0 150 134" aria-hidden="true">
+      <g class="mood-bubble" data-act="mood:info">
+        <rect x="8" y="2" width="134" height="38" rx="10"
+          fill="rgba(9,12,14,0.94)" stroke="${tone}" stroke-width="1.2" stroke-opacity="0.75"/>
+        <text x="75" y="17" text-anchor="middle" font-size="8.5" fill="var(--text-faint)" letter-spacing="0.2">${esc(sub)}</text>
+        <text x="75" y="32" text-anchor="middle" font-size="11.5" font-weight="600" fill="${tone}">${esc(mood.text)}</text>
+        <path d="M126 42 Q124 52 121 62" fill="none" stroke="${tone}" stroke-width="1.2"
+          stroke-dasharray="3 3" stroke-opacity="0.8"/>
+        <circle cx="121" cy="62" r="2.6" fill="${tone}">
+          <animate attributeName="r" values="2;3.2;2" dur="2s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+    </svg>
+  </div>`;
+}
+
+var runnerRAF = 0;
+
+/** 按步频切帧。render() 之后调用；页面切走时靠 contains 检查自然停下。 */
+function startRunnerAnim() {
+  if (runnerRAF) cancelAnimationFrame(runnerRAF);
+  runnerRAF = 0;
+
+  const wrap = document.querySelector('.runner-frames');
+  const rh = stats.rhythm;
+  if (!wrap || !rh) return;
+
+  const imgs = wrap.querySelectorAll('img');
+  if (!imgs.length) return;
+
+  const cadence = Math.min(210, Math.max(120, Number(rh.cadence) || 170));
+  const cycle = 120 / cadence;
+  const perFrame = (cycle * 1000) / imgs.length;
+
+  let idx = 0;
+  let last = performance.now();
+
+  const tick = (now) => {
+    if (!document.body.contains(wrap)) {
+      runnerRAF = 0;
+      return;
+    }
+    if (now - last >= perFrame) {
+      // 用取模对齐时间基准，避免 rAF 抖动累积成肉眼可见的速度漂移
+      last = now - ((now - last) % perFrame);
+      imgs[idx].classList.remove('on');
+      idx = (idx + 1) % imgs.length;
+      imgs[idx].classList.add('on');
+    }
+    runnerRAF = requestAnimationFrame(tick);
+  };
+
+  runnerRAF = requestAnimationFrame(tick);
 }
 
 /**

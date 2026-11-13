@@ -196,8 +196,35 @@ main {
   height: 159px;
   z-index: 1;
   pointer-events: none;
-  /* 淡绿光晕，让绿线条在深色卡片上"亮"起来而不是浮着 */
-  filter: drop-shadow(0 0 10px rgba(22, 224, 161, 0.28));
+}
+/* 序列帧：9 张图叠在同一位置，靠 .on 切换显隐。
+   叠放而不是换 src，是为了避免切帧时闪白 —— 图片早就解码好了。 */
+.runner-frames {
+  position: absolute;
+  right: 14px;
+  bottom: 6px;
+  width: 82px;
+  height: 105px;
+  filter: drop-shadow(0 0 9px rgba(22, 224, 161, 0.3));
+}
+.runner-frames .rf {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center bottom;
+  opacity: 0;
+  image-rendering: auto;
+}
+.runner-frames .rf.on { opacity: 1; }
+
+.mood-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
 }
 .runner-art .mood-bubble { pointer-events: auto; cursor: pointer; }
 .runner-art .mood-bubble:active { opacity: 0.7; }
