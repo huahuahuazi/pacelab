@@ -167,14 +167,18 @@ function runnerFigure() {
 
   const sub = `近 7 天 · ${rh.count} 次${rh.estimated ? '（估算）' : ''}`;
 
+  // 逐帧垂直补偿：9 帧头顶点在原图里相差 20px，直接播会上下乱跳。
+  // 统一对齐到「最靠下的那个头位」，并且只往下移不往上 —— 往上会把头顶怼进气泡里。
+  const DY = [0.0, 2.4, 2.4, 7.9, 9.7, 9.7, 9.7, 12.2, 12.2];
   let frames = '';
   for (let i = 1; i <= 9; i++) {
-    frames += `<img class="rf${i === 1 ? ' on' : ''}" src="assets/runner/f${i}.png" alt="" draggable="false">`;
+    frames += `<img class="rf${i === 1 ? ' on' : ''}" style="--dy:${DY[i - 1]}px" src="assets/runner/f${i}.png" alt="" draggable="false">`;
   }
 
   return `
   <div class="runner-art">
     <div class="runner-frames">${frames}</div>
+    <div class="runner-track"></div>
     <svg class="mood-layer" viewBox="0 0 150 134" aria-hidden="true">
       <g class="mood-bubble" data-act="mood:info">
         <rect x="8" y="2" width="134" height="38" rx="10"

@@ -1,27 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <rect width="512" height="512" rx="116" fill="#0b0d10"/>
-  <!-- 外圈跑道：底色环 + 一段高亮，暗示配速与进度 -->
   <circle cx="256" cy="256" r="196" fill="none" stroke="#1c242c" stroke-width="16"/>
   <path d="M256 60 A196 196 0 0 1 426 356" fill="none" stroke="#16e0a1" stroke-width="16" stroke-linecap="round" opacity="0.9"/>
-
-  <!-- 跑者：前倾冲刺姿态，四肢多关节（肘弯、膝弯）。
-       绘制顺序 = 远侧肢体 → 躯干 → 近侧肢体，近侧压在上面才有前后层次。 -->
-  <g stroke="#16e0a1" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" fill="none">
-    <!-- 后臂：肩 → 肘（向后下）→ 手（向上收回） -->
-    <path d="M302 202 L258 234 L228 192" stroke-opacity="0.55"/>
-    <!-- 后腿：髋 → 膝（向后下）→ 脚（向前收回，露出弯膝） -->
-    <path d="M260 272 L218 326 L252 366" stroke-opacity="0.55"/>
-
-    <!-- 躯干：髋 → 肩，明显前倾 -->
-    <path d="M260 272 L302 202"/>
-
-    <!-- 头 -->
-    <circle cx="326" cy="172" r="27" fill="#16e0a1" stroke="none"/>
-
-    <!-- 前腿：髋 → 膝 → 脚，支撑相接近伸直 -->
-    <path d="M260 272 L296 322 L306 374"/>
-
-    <!-- 前臂：肩 → 肘（向前下）→ 手（回到胸前） -->
-    <path d="M302 202 L346 234 L316 276"/>
-  </g>
+  <image x="136" y="90" width="239" height="320" preserveAspectRatio="xMidYMid meet" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHEAAACXCAYAAAAiY7RPAAADkUlEQVR4nO2dW07kQAxF0xFr8Dc7Y23sbL69iRm1BgmEaJFO6nGv65wfJESHik9sp1JJZ9sAAAAAAAAAAAAAAAAAAH7mthUl/rz/PfJ3+fpmHwP7HTgrr5LMfStEnBR49bOzKSMxGkhwFVlCYjQMvqNIe4nRIehuIq0lugW7F9YSexJGBwgSC2Ar0SlTemMrcQRhcqAgsQBIPJiN95+qmYnEA3yVpygSiSdQE4nEAiKRWECkrUTn9b/W2EqET5BYAGuJlNQCEu8kvdFfYmuR9225HRglJN5pEXg3eeUkxsU5m6vAOy/b4gLTWF4JiSveKFymnF5dFgqRy2XLSmwlIAqJtJHYY1E2ioiU74m9Ax0f23fuk7KZOPp2iDDOSjmJM+9lCVORMiXENYApUIan90RXeUpMLacINJeIQHOJCDSX2FKg49qfvcRWAs/Ky6LC5eaJvTIvPz5XUeT0KcYRWgc+P7ZXZSF5d8+8WHxBWFriqADnhf+jcpYtK3EkebHPzgaJYkLkJaoHKsXH9wgy8eQ0Rkn4EhKz8YUBJYHLSGyZlWoCbSb7s0lBcWUyUWWeNhtrifAfJBYAiQVAYgGQWIDyElN8etCC8hJXQFYic8ACEn8DyRMlrtCjRmObifAJEguAxAIgsQClJeYiJ1GlJcYi6417dTkh/D4La4kz7iaLwjKn9oxHQe35/EXFvjl9B74LORLUXhmVpkJlBn0XM1Ogs1SLQX5lVl9LYaGyA3uEwslJigmVGoyDQEWpSCwg1Gayr5qFCuO0kej0/TYxWGRJid9lzhA6UmS5p6LygbDvv3cpz2Uk9gh4FpIqX05HBTeNvyfOIhNnvi8qDDK0lMQefJWqKlS+nB4lB5RC1ZIrLVH1yFcbv7REVVIsG5FYgL1CKUqxzBiNrERYSGIunoWyEt3PSkcjKbESMeCAtJZIKRWV6FJKU6gXy0kEc4nMDQtIBNOlKJceuK0ucXVRcfA5k7PcHMUpnRnGwf3sOebLmbh6linw4iZLKQtlJarIgpNTDHWBZOEvEhFoLhGB3shfsalSQqNjq5p+xcZdVr6+3WZXsuESXWUp0/UoWkVYnIhhy9g0y8RVhCleT31aIrL0RO7uD5O406KdyU8xHMiLB/dVkUgswO72JmtV8kKMrsZ3d3uT9UpvEX+6nP60MQQ+zzMxaxXf26Mmi8B2/HTiQnwBAAAAAAAAAAAAAGArzz8kLb8/0nrdHQAAAABJRU5ErkJggg=="/>
 </svg>
