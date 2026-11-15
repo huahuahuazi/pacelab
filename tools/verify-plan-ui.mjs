@@ -215,6 +215,23 @@ const check = (ok, msg, extra) => {
     return 'clicked';
   })()`);
   check(gen === 'clicked', '点得到「生成」按钮');
+  await wait(500);
+
+  // 低跑量 + 5 练：现在应该先弹强度确认层，而不是偷偷降频直接生成
+  const confirmText = await evalJs(`(function(){
+    var s=document.querySelector('.sheet');
+    return s ? s.innerText.slice(0, 220) : 'no-sheet';
+  })()`);
+  check(/计划强度提醒/.test(confirmText), '先弹强度提醒，没有直接生成');
+  check(/偏大/.test(confirmText), '提醒里明确说了强度偏大');
+  check(/按我的选择生成/.test(confirmText), '确认层提供「按我的选择生成」');
+
+  const confirmed = await evalJs(`(function(){
+    var b=document.querySelector('[data-act="plan:confirm"]');
+    if(!b) return 'no-confirm-button';
+    b.click(); return 'clicked';
+  })()`);
+  check(confirmed === 'clicked', '点「按我的选择生成」');
   await wait(900);
 
   // 6) 读结果：标题、周数、每周天数
@@ -240,10 +257,9 @@ const check = (ok, msg, extra) => {
   check(result.ev === '5K', '生成的目标距离是 5K（不是 10K）', result.ev);
   check(result.weeks === 8, '5K 计划是 8 周', result.weeks + ' 周');
   check(result.req === 5, '用户选的天数被记录下来了', result.req + ' 练');
-  // 种子数据近 30 天 66.5km → 每周 15.5km，低于 18km 门槛，
-  // 所以排 5 练会被降成 3 练。这是设计行为（排 5 练等于每天 3km 假训练），
-  // 关键是 requestedDpw 要留住用户的选择，界面才能解释"为什么给你排了 3 练"。
-  check(result.dpw === 3 && result.req === 5, '跑量不足时降为 3 练，但记住用户选的 5 练', `${result.dpw} 练 / 用户选 ${result.req}`);
+  // 核心变更：用户选 5 练就排 5 练，确认过之后不再被偷偷改成 3 练
+  check(result.dpw === 5 && result.req === 5, '按用户选的 5 练生成，不再自动降为 3 练', `${result.dpw} 练 / 用户选 ${result.req}`);
+  check(!/已自动降/.test(result.header), '计划页不再出现「已自动降为」', result.header.slice(0, 60));
   check(!result.aligned || result.start.slice(8) === '16', '起始日对齐到周一', result.start);
 
   /* ---- 第二轮：强度档位 + 自选周数，真点按钮走完整链路 ---- */
@@ -284,18 +300,29 @@ const check = (ok, msg, extra) => {
     b.click(); return 'clicked';
   })()`);
   check(gen2 === 'clicked', '第二轮的「生成」按钮可点');
+  await wait(500);
+
+  // 第二轮走另一条路径：采用建议（默认 4 练 + 低跑量 → 建议降到 3 练）
+  const suggBtn = await evalJs(`(function(){
+    var b=document.querySelector('[data-act="plan:confirmSuggested"]');
+    if(!b) return 'no-suggest-button';
+    b.click(); return 'clicked';
+  })()`);
+  check(suggBtn === 'clicked', '确认层提供「采用建议生成」');
   await wait(900);
 
   const r2 = await evalJs(`(function(){
     var s=JSON.parse(localStorage.getItem('pacelab.state.v1'));
     var p=s.plans[s.plans.length-1];
-    return p?{intensity:p.intensity,label:p.intensityLabel,weeks:p.weeks,total:p.totalKm,reqWeeks:p.weeksRequested}:null;
+    return p?{intensity:p.intensity,label:p.intensityLabel,weeks:p.weeks,total:p.totalKm,
+      reqWeeks:p.weeksRequested,dpw:p.daysPerWeek,fit:p.fitLevel}:null;
   })()`);
   check(!!r2, '第二轮计划已入库');
   if (r2) {
     check(r2.intensity === 'light', '强度档位是休闲版', r2.intensity);
     check(r2.weeks === 12, '训练周数是用户选的 12 周', r2.weeks + ' 周');
     check(r2.reqWeeks === 12, '原始选择被记录下来', String(r2.reqWeeks));
+    check(r2.dpw === 3, '采用建议后按建议的 3 练排', r2.dpw + ' 练');
     // 两轮周数不同（8 周 vs 12 周），比总量没有意义，要比较周均跑量
     const avgLight = r2.total / r2.weeks;
     const avgNormal = result.total / result.weeks;

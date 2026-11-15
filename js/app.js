@@ -11,7 +11,7 @@
  */
 
 import * as C from './core.js';
-import { generatePlan, toDateStr, PHASE_LABEL, retitleDay, recalcPlanTotals, blankPlan } from './plan.js';
+import { generatePlan, evaluatePlanFit, toDateStr, PHASE_LABEL, retitleDay, recalcPlanTotals, blankPlan } from './plan.js';
 import * as S from './store.js';
 import { lineChart, barChart, weeklyBuckets } from './chart.js';
 import { recognizeRunImage, warmup } from './ocr.js';
@@ -50,7 +50,13 @@ if (typeof Image !== 'undefined') {
   }
 }
 
-const ui = { tab: 'home', modal: null, ocr: null, planWeeks: 4, planFilter: 'all' };
+const ui = {
+  tab: 'home', modal: null, ocr: null, planWeeks: 4, planFilter: 'all',
+  // 生成前强度提醒的待确认参数。用户点「按我的选择」或「采用建议」都从这里取，
+  // 避免确认框重绘后丢掉用户刚才选的一堆东西。
+  pendingPlan: null,
+  planDraft: { ev: '10K', dpw: 4, intensity: 'normal', weeks: 0, startDate: '' },
+};
 
 // 支持 index.html#plan 直接打开某个 tab。
 // 调试和截图时省掉"打开→点三次"的步骤，也让某个页面可以被直接分享。
@@ -516,8 +522,8 @@ function viewPlan() {
         <div>
           <h2>${esc(plan.targetLabel)} 训练计划</h2>
           <p class="meta">${plan.weeks} 周 · 每周 ${plan.daysPerWeek} 练 · 共 ${plan.totalKm}km${plan.intensityLabel ? ` · ${esc(plan.intensityLabel)}` : ''}<br>起点 ${plan.baseKm}km/周 → 峰值 ${plan.peakKm}km/周${
-            plan.requestedDpw && plan.daysPerWeek < plan.requestedDpw
-              ? `<br><span style="color:var(--warn)">当前跑量撑不起每周 ${plan.requestedDpw} 练，已自动降为 ${plan.daysPerWeek} 练。先把跑量堆起来再加频次。</span>`
+            plan.fitLevel && plan.fitLevel !== 'ok'
+              ? `<br><span style="color:var(--warn)">${esc(plan.fitNote)}：已按你的选择排，留意身体反馈，别硬顶。</span>`
               : ''
           }</p>
         </div>
@@ -762,6 +768,11 @@ function modalAddRun(preset) {
 }
 
 function modalPlanNew() {
+  const d = ui.planDraft;
+  // 从草稿渲染选中态：用户点「返回修改」回来时，之前选的不该被清空
+  const segBtn = (group, value, label) =>
+    `<button class="${String(d[group]) === String(value) ? 'on' : ''}" data-act="seg" data-group="${group}" data-value="${value}">${label}</button>`;
+
   return `
   <div class="mask" data-act="modal:bg">
     <div class="sheet">
@@ -772,18 +783,16 @@ function modalPlanNew() {
       <div class="field">
         <label>目标距离</label>
         <div class="seg" id="seg-ev">
-          ${C.EVENTS.map(
-            (ev, i) => `<button class="${i === 1 ? 'on' : ''}" data-act="seg" data-group="ev" data-value="${ev}">${C.EVENT_SHORT[ev]}</button>`
-          ).join('')}
+          ${C.EVENTS.map((ev) => segBtn('ev', ev, C.EVENT_SHORT[ev])).join('')}
         </div>
       </div>
 
       <div class="field">
         <label>训练强度 <span class="opt">按身体状态选</span></label>
         <div class="seg" id="seg-intensity">
-          <button data-act="seg" data-group="intensity" data-value="light">休闲版</button>
-          <button class="on" data-act="seg" data-group="intensity" data-value="normal">适量版</button>
-          <button data-act="seg" data-group="intensity" data-value="plus">加量版</button>
+          ${segBtn('intensity', 'light', '休闲版')}
+          ${segBtn('intensity', 'normal', '适量版')}
+          ${segBtn('intensity', 'plus', '加量版')}
         </div>
         <div class="hint">适量版按你当前跑量推算；休闲版约 −22%，加量版约 +22%。最近累、睡不好就选休闲版。</div>
       </div>
@@ -791,29 +800,29 @@ function modalPlanNew() {
       <div class="field">
         <label>每周训练天数</label>
         <div class="seg" id="seg-dpw">
-          <button data-act="seg" data-group="dpw" data-value="3">3 练</button>
-          <button class="on" data-act="seg" data-group="dpw" data-value="4">4 练</button>
-          <button data-act="seg" data-group="dpw" data-value="5">5 练</button>
+          ${segBtn('dpw', 3, '3 练')}
+          ${segBtn('dpw', 4, '4 练')}
+          ${segBtn('dpw', 5, '5 练')}
         </div>
-        <div class="hint">3 练适合刚起步，4 练是业余跑者性价比最高的频率。</div>
+        <div class="hint">3 练适合刚起步，4 练是业余跑者性价比最高的频率。选了就按选的排。</div>
       </div>
 
       <div class="field">
         <label>训练周数 <span class="opt">默认按目标距离</span></label>
         <div class="seg seg-grid" id="seg-weeks">
-          <button class="on" data-act="seg" data-group="weeks" data-value="0">跟随默认</button>
-          <button data-act="seg" data-group="weeks" data-value="4">4 周</button>
-          <button data-act="seg" data-group="weeks" data-value="8">8 周</button>
-          <button data-act="seg" data-group="weeks" data-value="12">12 周</button>
-          <button data-act="seg" data-group="weeks" data-value="16">16 周</button>
-          <button data-act="seg" data-group="weeks" data-value="20">20 周</button>
+          ${segBtn('weeks', 0, '跟随默认')}
+          ${segBtn('weeks', 4, '4 周')}
+          ${segBtn('weeks', 8, '8 周')}
+          ${segBtn('weeks', 12, '12 周')}
+          ${segBtn('weeks', 16, '16 周')}
+          ${segBtn('weeks', 20, '20 周')}
         </div>
         <div class="hint">默认：5K 8 周 / 10K 10 周 / 半马 12 周 / 全马 16 周。周数越短，每周加量越陡。</div>
       </div>
 
       <div class="field">
         <label>起始日期 <span class="opt">默认下周一</span></label>
-        <input class="input" id="f-start" type="date" value="${toDateStr(new Date())}" />
+        <input class="input" id="f-start" type="date" value="${d.startDate || toDateStr(new Date())}" />
         <div class="hint">如果今天不是周一，建议留出几天准备。计划按周一到周日排。</div>
       </div>
 
@@ -826,6 +835,78 @@ function modalPlanNew() {
       </button>
     </div>
   </div>`;
+}
+
+/**
+ * 生成前的强度确认层。
+ * 只把「你选的」和「你的实际跑量」之间的差距摊开，给出建议但不代改。
+ * 用户点哪个按钮，就按哪个方案生成 —— 不再有"已自动降为 X 练"这种事。
+ */
+function modalPlanConfirm() {
+  const pending = ui.pendingPlan;
+  if (!pending) return '';
+  const { fit } = pending;
+  const r = fit.requested;
+  const LABEL = { light: '休闲版', normal: '适量版', plus: '加量版' };
+  const color = fit.level === 'tooHigh' ? 'var(--warn)' : 'var(--primary)';
+  const s = fit.suggestion;
+  const suggestText = s ? `每周 ${s.daysPerWeek} 练 · ${LABEL[s.intensity]}` : '';
+
+  return `
+  <div class="mask" data-act="modal:bg">
+    <div class="sheet">
+      <div class="sheet-grip"></div>
+      <h3>计划强度提醒</h3>
+      <p class="sheet-sub">不会替你改选择，先确认一下再生成。</p>
+
+      <div style="background:rgba(255,255,255,0.04);border-left:3px solid ${color};border-radius:8px;padding:12px;margin:12px 0">
+        <div style="color:${color};font-weight:600;font-size:15px;margin-bottom:8px">${esc(fit.title)}</div>
+        <ul style="margin:0 0 10px;padding-left:18px;color:var(--text-dim);font-size:13px;line-height:1.6">
+          ${fit.reasons.map((x) => `<li>${esc(x)}</li>`).join('')}
+        </ul>
+        <div style="font-size:12.5px;color:var(--text-dim);line-height:1.6">
+          你选的是：<b>${r.weeks} 周 · 每周 ${r.daysPerWeek} 练 · ${LABEL[r.intensity]}</b><br>
+          当前周均跑量约 ${fit.currentKm}km，计划第一周约 ${fit.plannedKm}km。
+          ${s ? `<br>建议：<b>${suggestText}</b>，更贴近你现在的跑量。` : ''}
+        </div>
+      </div>
+
+      <div class="row-btns mt16">
+        <button class="btn ghost" data-act="plan:back">返回修改</button>
+        <button class="btn primary" data-act="plan:confirm">按我的选择生成</button>
+      </div>
+      ${s
+        ? `<button class="btn ghost mt8" style="width:100%" data-act="plan:confirmSuggested">采用建议生成（${suggestText}）</button>`
+        : ''}
+    </div>
+  </div>`;
+}
+
+/** 生成并落盘。直接生成、确认后生成、采用建议生成都走这一条。 */
+function doGeneratePlan(opts) {
+  const plan = generatePlan(opts);
+  state.plans = state.plans.filter((p) => p.id !== state.activePlanId);
+  state.plans.push(plan);
+  state.activePlanId = plan.id;
+  ui.modal = null;
+  ui.pendingPlan = null;
+  ui.planWeeks = 4;
+  commit();
+  ui.tab = 'plan';
+  render();
+
+  // 起始日对齐是唯一还会"自动发生"的事（否则整周星期全错位），必须说出来
+  const md = (s) => {
+    const p = String(s).split('-');
+    return `${Number(p[1])}/${Number(p[2])}`;
+  };
+  const notes = [];
+  if (plan.startAligned) notes.push(`起始日对齐到 ${md(plan.startDate)}（周一）`);
+  if (plan.fitLevel && plan.fitLevel !== 'ok') notes.push(`${plan.fitNote}，已按你的选择生成`);
+  toast(
+    `已生成 ${plan.weeks} 周 ${plan.targetLabel} · ${plan.intensityLabel} 计划 · 每周 ${plan.daysPerWeek} 练` +
+      (notes.length ? ` · ${notes.join(' · ')}` : '')
+  );
 }
 
 function modalDone(planId, dayId) {
@@ -890,6 +971,7 @@ function modalRender() {
   if (!m) return '';
   if (m.type === 'add') return modalAddRun(m.preset);
   if (m.type === 'planNew') return modalPlanNew();
+  if (m.type === 'planConfirm') return modalPlanConfirm();
   if (m.type === 'done') return modalDone(m.planId, m.dayId);
   if (m.type === 'paceInfo') return modalPaceInfo(m.key);
   if (m.type === 'moodInfo') return modalMoodInfo();
@@ -1162,6 +1244,8 @@ function openAdd(preset) {
 function closeModal() {
   ui.modal = null;
   ui.ocr = null;
+  // 统一收口：点遮罩、点取消都走这里，待确认的参数不能留在内存里
+  ui.pendingPlan = null;
   render();
 }
 
@@ -1228,6 +1312,7 @@ function handleClick(e) {
       break;
 
     case 'modal:close':
+      ui.pendingPlan = null;
       closeModal();
       break;
 
@@ -1302,56 +1387,73 @@ function handleClick(e) {
     }
 
     case 'plan:gen': {
-      const evBtn = document.querySelector('#seg-ev button.on');
-      const dpwBtn = document.querySelector('#seg-dpw button.on');
-      const itBtn = document.querySelector('#seg-intensity button.on');
-      const wkBtn = document.querySelector('#seg-weeks button.on');
+      const readSeg = (sel, fallback) => {
+        const b = document.querySelector(sel + ' button.on');
+        return b ? b.dataset.value : fallback;
+      };
       const startEl = document.getElementById('f-start');
-      const ev = evBtn ? evBtn.dataset.value : '10K';
-      const dpw = dpwBtn ? Number(dpwBtn.dataset.value) : 4;
-      const intensity = itBtn ? itBtn.dataset.value : 'normal';
-      // 0 = 跟随目标距离的默认周数，不传 weeks 让 plan.js 自己按 SPEC 取
-      const weeks = wkBtn ? Number(wkBtn.dataset.value) : 0;
-      const baseWeekKm = stats.last30Km / 4.3 || 0;
-      try {
-        const plan = generatePlan({
-          targetEv: ev,
-          vdot: stats.currentVdot,
-          baseWeekKm,
-          daysPerWeek: dpw,
-          intensity,
-          weeks: weeks || undefined,
-          startDate: startEl ? startEl.value : undefined,
-        });
-        state.plans = state.plans.filter((p) => p.id !== state.activePlanId);
-        state.plans.push(plan);
-        state.activePlanId = plan.id;
-        ui.modal = null;
-        ui.planWeeks = 4;
-        commit();
-        ui.tab = 'plan';
-        render();
+      const ev = readSeg('#seg-ev', '10K');
+      const dpw = Number(readSeg('#seg-dpw', '4'));
+      const intensity = readSeg('#seg-intensity', 'normal');
+      // 0 = 跟随目标距离的默认周数，不传 weeks 让 plan.js 按 SPEC 取
+      const weeks = Number(readSeg('#seg-weeks', '0'));
+      const startDate = startEl ? startEl.value : undefined;
 
-        // 两件以前静默发生、但用户必须知道的事：
-        //   1) 起始日不是周一时被对齐了（否则整周七天错位）
-        //   2) 跑量撑不起所选天数时被降级了（否则会排出"每天 2 公里"的假计划）
-        // 不说清楚，用户只会觉得"我选的没生效"。
-        const md = (s) => {
-          const p = String(s).split('-');
-          return `${Number(p[1])}/${Number(p[2])}`;
-        };
-        const notes = [];
-        if (plan.startAligned) notes.push(`起始日对齐到 ${md(plan.startDate)}（周一）`);
-        if (plan.daysPerWeek < plan.requestedDpw) {
-          notes.push(`当前跑量撑不起 ${plan.requestedDpw} 练，按 ${plan.daysPerWeek} 练排`);
+      const opts = {
+        targetEv: ev,
+        vdot: stats.currentVdot,
+        baseWeekKm: stats.last30Km / 4.3 || 0,
+        daysPerWeek: dpw,
+        intensity,
+        weeks: weeks || undefined,
+        startDate,
+      };
+
+      // 草稿留底：用户从确认层点「返回修改」时，刚才选的一堆东西原样带回来
+      ui.planDraft = { ev, dpw, intensity, weeks, startDate: startDate || '' };
+
+      const fit = evaluatePlanFit(opts);
+      if (fit.level === 'ok') {
+        try {
+          doGeneratePlan(opts);
+        } catch (err) {
+          toast(err.message || '生成失败');
         }
-        toast(
-          `已生成 ${plan.weeks} 周 ${plan.targetLabel} · ${plan.intensityLabel} 计划` +
-            (notes.length ? ` · ${notes.join(' · ')}` : '')
-        );
+      } else {
+        // 不生成、不改参数，先让用户看差距再决定
+        ui.pendingPlan = { opts, fit };
+        ui.modal = { type: 'planConfirm' };
+        render();
+      }
+      break;
+    }
+
+    case 'plan:confirm': {
+      const p = ui.pendingPlan;
+      if (!p) break;
+      try {
+        doGeneratePlan(p.opts);
       } catch (err) {
         toast(err.message || '生成失败');
       }
+      break;
+    }
+
+    case 'plan:confirmSuggested': {
+      const p = ui.pendingPlan;
+      if (!p || !p.fit.suggestion) break;
+      try {
+        doGeneratePlan({ ...p.opts, ...p.fit.suggestion });
+      } catch (err) {
+        toast(err.message || '生成失败');
+      }
+      break;
+    }
+
+    case 'plan:back': {
+      ui.pendingPlan = null;
+      ui.modal = { type: 'planNew' };
+      render();
       break;
     }
 

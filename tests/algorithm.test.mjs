@@ -7,7 +7,7 @@
 
 import assert from 'node:assert';
 import * as C from '../js/core.js';
-import { generatePlan } from '../js/plan.js';
+import { generatePlan, evaluatePlanFit } from '../js/plan.js';
 
 let pass = 0;
 const t = (name, fn) => {
@@ -98,10 +98,34 @@ for (const ev of ['5K', '10K', 'HM', 'FM']) {
 t('VDOT 缺失时拒绝生成', () => {
   assert.throws(() => generatePlan({ targetEv: '10K', vdot: 0, baseWeekKm: 20 }));
 });
-t('跑量不足时自动降为 3 练而不是硬排 4 练', () => {
-  const p = generatePlan({ targetEv: '5K', vdot: 45, baseWeekKm: 0, daysPerWeek: 4 });
-  assert.strictEqual(p.daysPerWeek, 3);
-  assert.ok(p.requestedDpw === 4);
+t('用户选 5 练就排 5 练，不再自动降级', () => {
+  const p = generatePlan({ targetEv: '5K', vdot: 45, baseWeekKm: 0, daysPerWeek: 5 });
+  assert.strictEqual(p.daysPerWeek, 5, '选择必须原样生效');
+  assert.strictEqual(p.requestedDpw, 5);
+  assert.strictEqual(p.fitLevel, 'tooHigh', '跑量为 0 且 5 练，应标记为偏大');
+});
+
+t('生成前评估：低跑量高频次判偏大，高跑量休闲版判偏小，匹配时放行', () => {
+  const high = evaluatePlanFit({ targetEv: '5K', baseWeekKm: 12, daysPerWeek: 5, intensity: 'normal', weeks: 8 });
+  assert.strictEqual(high.level, 'tooHigh');
+  assert.ok(high.reasons.length > 0, '偏大必须给出具体原因');
+  assert.ok(high.suggestion, '偏大必须给出建议');
+  assert.ok(high.suggestion.daysPerWeek < 5, '建议应降低频次');
+
+  const low = evaluatePlanFit({ targetEv: '5K', baseWeekKm: 55, daysPerWeek: 3, intensity: 'light', weeks: 8 });
+  assert.strictEqual(low.level, 'tooLow');
+  assert.ok(low.suggestion.daysPerWeek > 3 || low.suggestion.intensity !== 'light', '建议应加量');
+
+  const ok = evaluatePlanFit({ targetEv: '5K', baseWeekKm: 25, daysPerWeek: 4, intensity: 'normal', weeks: 8 });
+  assert.strictEqual(ok.level, 'ok', '匹配时不应拦一道确认');
+  assert.strictEqual(ok.suggestion, null);
+});
+
+t('评估函数只给建议，绝不改动传入参数', () => {
+  const opts = { targetEv: '5K', baseWeekKm: 12, daysPerWeek: 5, intensity: 'plus', weeks: 8 };
+  const snapshot = JSON.stringify(opts);
+  evaluatePlanFit(opts);
+  assert.strictEqual(JSON.stringify(opts), snapshot, '评估不能修改 opts');
 });
 
 /* ---------------- 生成参数必须真的生效（P0 回归） ---------------- */

@@ -52,11 +52,18 @@ const DOW_LABEL = ['周一', '周二', '周三', '周四', '周五', '周六', '
 const MIN_QUALITY_PRIMARY = 3.0;
 const MIN_QUALITY_SECOND = 5.0;
 
-/** 周跑量低于这个值时，4 练会被摊成"每天 2 公里"，不如老实跑 3 练 */
+/** 周跑量低于这个值时，4 练会被摊成"每天 2 公里" —— 只用于「提醒」，不再自动改用户选择 */
 const MIN_KM_FOR_4_DAYS = 18;
 
 /** 起点跑量的绝对下限。再低就不是训练量的问题，是先养成习惯的问题 */
 const MIN_BASE_KM = 12;
+
+/** 三档强度。提到模块级是因为「生成前评估」和「生成」要用同一份口径，不能各写一遍 */
+const INTENSITY = {
+  light: { kmScale: 0.78, label: '休闲版' },
+  normal: { kmScale: 1.0, label: '适量版' },
+  plus: { kmScale: 1.22, label: '加量版' },
+};
 
 /* ---------------- 日期工具 ---------------- */
 
@@ -193,6 +200,68 @@ function makeQuality(phase, km, paces, targetEv, isPrimary) {
  * @param {string} [opts.startDate]  起始日期 YYYY-MM-DD，默认下周一
  * @param {number} [opts.daysPerWeek] 每周训练天数 3~5，默认 4
  */
+/**
+ * 生成前评估：用户选的组合 vs 实际跑量。
+ *
+ * 只出结论和建议，一个参数都不改。之前这一步是「自动把 5 练降成 3 练」，
+ * 现在改成把差距摊开，让用户在确认框里自己定 —— 决定权不能偷偷拿走。
+ * 判定分「偏大」（伤病风险）和「偏小」（练不到）两类，偏大优先。
+ */
+export function evaluatePlanFit(opts) {
+  const targetEv = opts.targetEv || '10K';
+  const spec = SPEC[targetEv] || SPEC['10K'];
+  const currentKm = r1(Math.max(0, Number(opts.baseWeekKm) || 0));
+  const dpw = Math.max(3, Math.min(5, Number(opts.daysPerWeek) || 4));
+  const intensityKey = INTENSITY[opts.intensity] ? opts.intensity : 'normal';
+  const weeks = Math.max(4, Math.min(24, Math.round(Number(opts.weeks) || spec.weeks)));
+
+  const plannedKm = r1(Math.max(MIN_BASE_KM, currentKm * INTENSITY[intensityKey].kmScale));
+  const perRun = r1(plannedKm / dpw);
+
+  const high = [];
+  const low = [];
+
+  // 偏大：跑量被摊薄、低基数还加量、备赛周期太短
+  if (currentKm < MIN_KM_FOR_4_DAYS && dpw >= 4) {
+    high.push(`近 30 天周均 ${currentKm}km，选了每周 ${dpw} 练，平均每次只有 ${perRun}km`);
+  }
+  if (currentKm > 0 && currentKm < MIN_BASE_KM && intensityKey === 'plus') {
+    high.push(`周均跑量只有 ${currentKm}km，加量版还要再抬 22%`);
+  }
+  if ((targetEv === 'FM' && weeks < 12) || (targetEv === 'HM' && weeks < 8)) {
+    high.push(`${EVENT_SHORT[targetEv]} 只给 ${weeks} 周，周跑量爬升会比常规周期陡`);
+  }
+
+  // 偏小：跑量明显高于计划、档位过保守、周期拖太长
+  if (currentKm > 35 && dpw === 3 && intensityKey !== 'plus') {
+    low.push(`周均 ${currentKm}km，却只排每周 3 练，频次偏少`);
+  }
+  if (currentKm > 40 && intensityKey === 'light') {
+    low.push(`周均 ${currentKm}km 选休闲版，第一周只排 ${plannedKm}km，刺激偏弱`);
+  }
+  if (targetEv === '5K' && weeks > 16) {
+    low.push(`5K 排 ${weeks} 周，中后段容易变成重复跑量`);
+  }
+
+  const level = high.length ? 'tooHigh' : low.length ? 'tooLow' : 'ok';
+  const suggestion = level === 'tooHigh'
+    ? { daysPerWeek: Math.max(3, dpw - 1), intensity: intensityKey === 'plus' ? 'normal' : intensityKey }
+    : level === 'tooLow'
+      ? { daysPerWeek: Math.min(5, dpw + 1), intensity: intensityKey === 'light' ? 'normal' : intensityKey }
+      : null;
+
+  return {
+    level,
+    title: level === 'tooHigh' ? '这份计划对你偏大' : level === 'tooLow' ? '这份计划对你偏小' : '',
+    reasons: level === 'tooHigh' ? high : low,
+    suggestion,
+    currentKm,
+    plannedKm,
+    perRun,
+    requested: { daysPerWeek: dpw, intensity: intensityKey, weeks },
+  };
+}
+
 export function generatePlan(opts) {
   const targetEv = opts.targetEv || '10K';
   const spec = SPEC[targetEv] || SPEC['10K'];
@@ -202,14 +271,6 @@ export function generatePlan(opts) {
 
   const paces = trainingPaces(vdot);
 
-  // 强度档位：适量版 = 用户当前跑量直接推算，休闲/加量在其上缩放。
-  // 只缩放跑量起点，后面「周曲线 → 每日分配」全链路自动跟随，
-  // 不需要去改每一天的距离公式 —— 那才是容易改出前后矛盾的地方。
-  const INTENSITY = {
-    light: { kmScale: 0.78, label: '休闲版' },
-    normal: { kmScale: 1.0, label: '适量版' },
-    plus: { kmScale: 1.22, label: '加量版' },
-  };
   const intensityKey = INTENSITY[opts.intensity] ? opts.intensity : 'normal';
   const intensity = INTENSITY[intensityKey];
 
@@ -225,10 +286,11 @@ export function generatePlan(opts) {
   const minPeak = spec.minPeak * intensity.kmScale;
   const peakKm = Math.min(spec.capacity * intensity.kmScale, Math.max(minPeak, baseKm * 1.6));
 
-  // 跑量撑不起用户选的训练频率时，自动降到 3 练。计划要能跑完，不能只是排得好看。
+  // 用户选几天就排几天，不再自动降频。
+  // 跑量撑不撑得起是「提醒」的事（见 evaluatePlanFit），不是这里偷偷改掉用户选择的理由。
+  // 决定权必须留在用户手上 —— 悄悄把 5 练改成 3 练，用户只会以为自己的选择没生效。
   const requestedDpw = Math.max(3, Math.min(5, Number(opts.daysPerWeek) || 4));
-  let daysPerWeek = requestedDpw;
-  if (baseKm < MIN_KM_FOR_4_DAYS && daysPerWeek > 3) daysPerWeek = 3;
+  const daysPerWeek = requestedDpw;
   const tpl = TEMPLATE[daysPerWeek];
 
   // 起始日期一律对齐到周一，理由见 alignToMonday
@@ -429,6 +491,12 @@ export function generatePlan(opts) {
   const regular = weekKms.slice(0, Math.max(1, weeks - 1));
   const realPeak = regular.length ? Math.max(...regular) : weekKms[0];
 
+  // 把生成前的评估结论记进计划对象，计划页才知道要不要挂一句提醒
+  const fit = evaluatePlanFit({
+    targetEv, baseWeekKm: userKm, daysPerWeek: requestedDpw,
+    intensity: intensityKey, weeks,
+  });
+
   return {
     id: 'plan_' + Date.now().toString(36),
     createdAt: new Date().toISOString(),
@@ -438,6 +506,8 @@ export function generatePlan(opts) {
     weeks,
     intensity: intensityKey,
     intensityLabel: intensity.label,
+    fitLevel: fit.level,
+    fitNote: fit.level === 'ok' ? '' : fit.title,
     // 0 表示「跟随目标距离默认值」，UI 上不用再解释一遍
     weeksRequested: Math.round(Number(opts.weeks) || 0),
     baseKm: r1(baseKm),
