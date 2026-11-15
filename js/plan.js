@@ -44,13 +44,46 @@ const PHASE_LABEL = { base: '基础期', build: '强化期', peak: '巅峰期', 
 
 const DOW_LABEL = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 
+/* ---------------- 质量课排布 ----------------
+   原来这里有两个门槛（主课 ≥3km、次课 ≥5km 才排质量课）。
+   跑量统计不足的跑者每天被摊到 3km 左右，次课永远不达标，
+   结果整份计划一节强度都没有 —— 这是「用跑量误判能力」。
+   现在改成：距离小就排短而真的质量课，类型按阶段＋周序轮转，
+   配速一律取 VDOT 派生的 T/I/R/M，跟预测成绩同一个水平。 */
+
 /**
- * 质量课的最小有效距离。低于这个就别硬排，改轻松跑更实在 ——
- * 一节 2km 的"间歇课"（热身 1km + 2 组 800m + 冷身 0.5km）没有训练价值。
- * 主课门槛低一些，次课门槛高一档：一周两次像样的质量课只在跑量够时才成立。
+ * 一周 2 次质量课（主+次）是业余跑者的安全上限，不是一周塞四种强度。
+ * 四类课靠跨周轮转全部覆盖。3 练时只有一次质量课，走 SOLO 的 4 周循环，
+ * 否则冲刺跑永远轮不到主课位置。
  */
-const MIN_QUALITY_PRIMARY = 3.0;
-const MIN_QUALITY_SECOND = 5.0;
+const QUALITY_PAIR = {
+  base: [['fartlek', 'sprint'], ['tempo', 'sprint']],
+  build: [['interval', 'tempo'], ['fartlek', 'sprint']],
+  peak: [['interval', 'sprint'], ['race', 'tempo']],
+  taper: [['tempo', 'sprint'], ['fartlek', 'sprint']],
+};
+const QUALITY_SOLO = {
+  base: ['fartlek', 'sprint', 'tempo', 'sprint'],
+  build: ['interval', 'tempo', 'fartlek', 'interval'],
+  peak: ['interval', 'race', 'tempo', 'interval'],
+  taper: ['tempo', 'sprint', 'fartlek', 'sprint'],
+};
+
+function qualityKind(phase, w, isPrimary, slotCount, targetEv, isCutback) {
+  if (isCutback) return isPrimary ? 'sprint' : 'fartlek';
+  if (slotCount === 1) {
+    const list = QUALITY_SOLO[phase] || QUALITY_SOLO.build;
+    let kind = list[w % list.length];
+    // 比赛配速跑只对半马/全马有意义，短距离目标回落到间歇
+    if (kind === 'race' && targetEv !== 'HM' && targetEv !== 'FM') kind = 'interval';
+    return kind;
+  }
+  const list = QUALITY_PAIR[phase] || QUALITY_PAIR.build;
+  const pair = list[w % list.length];
+  let kind = isPrimary ? pair[0] : pair[1];
+  if (kind === 'race' && targetEv !== 'HM' && targetEv !== 'FM') kind = 'interval';
+  return kind;
+}
 
 /** 周跑量低于这个值时，4 练会被摊成"每天 2 公里" —— 只用于「提醒」，不再自动改用户选择 */
 const MIN_KM_FOR_4_DAYS = 18;
@@ -127,65 +160,93 @@ const TEMPLATE = {
  * 距离字段保持一致。主体跑量写在描述里 —— 标题写 4.1km 而表单填 6.6km，
  * 用户只会以为你算错了。
  */
-function makeQuality(phase, km, paces, targetEv, isPrimary) {
+/**
+ * 一次质量课。km 是该课的总距离，函数只填内容、不改总距离 ——
+ * 周跑量守恒靠这个约束，内容长短靠组数去消化。
+ *
+ * kind 由 qualityKind 决定，四类课都有「短距离版本」：
+ * 2km 也能排 6×100m 加速跑，不需要降级成轻松跑。
+ * 配速全部来自 trainingPaces(vdot)，也就是预测成绩的那个 VDOT 水平。
+ */
+function makeQuality(phase, km, paces, targetEv, isPrimary, kind) {
   const total = r1(km);
   let warm = 2;
   let cool = 1.5;
-  if (total < 8) {
-    warm = 1.5;
-    cool = 1;
-  }
-  if (total < 5.5) {
-    warm = 1;
-    cool = 0.5;
-  }
-  const body = Math.max(1, r1(total - warm - cool));
+  if (total < 8) { warm = 1.5; cool = 1; }
+  if (total < 5.5) { warm = 1; cool = 0.5; }
+  if (total < 3.5) { warm = 0.8; cool = 0.4; }
+  const body = Math.max(0.8, r1(total - warm - cool));
 
   const pT = fmtPace(paces.T);
   const pI = fmtPace(paces.I);
   const pM = fmtPace(paces.M);
+  const pR = fmtPace(paces.R);
+  const pE = fmtPace(paces.E);
+  const tag = isPrimary ? '' : '（次课）';
+  const shell = { distKm: total };
+
+  if (kind === 'sprint') {
+    // 加速跑练的是神经肌肉和跑姿，不是心肺；组间走回、不追配速上限
+    const reps = Math.max(4, Math.min(12, Math.floor(body / 0.15)));
+    return {
+      ...shell,
+      paceKey: 'R',
+      paceText: `${pR}/km`,
+      title: `加速跑 ${reps} × 100m${tag}`,
+      desc: `热身 ${warm}km → ${reps} 组 100m 渐进加速到 ${pR}/km，组间走回起点完全恢复 → 冷身 ${cool}km。全程 ${total}km。练的是抬腿和步频，不是喘。`,
+    };
+  }
+
+  if (kind === 'interval') {
+    // 一组 = 800m 快 + 400m 慢跑恢复 ≈ 1.2km
+    const reps = Math.max(2, Math.min(10, Math.floor((body - 0.6) / 1.2) + 1));
+    return {
+      ...shell,
+      paceKey: 'I',
+      paceText: `${pI}/km`,
+      title: `间歇 ${reps} × 800m${tag}`,
+      desc: `${reps} 组 800m @ ${pI}/km，组间慢跑 400m 恢复。全程 ${total}km：热身 ${warm}km、冷身 ${cool}km。撑不住就减组数，别降配速。`,
+    };
+  }
+
+  if (kind === 'fartlek') {
+    const sets = Math.max(2, Math.min(8, Math.floor(body / 0.7) + 1));
+    return {
+      ...shell,
+      paceKey: 'T',
+      paceText: `${pT}/km`,
+      title: `法特莱克 ${total}km${tag}`,
+      desc: `热身 ${warm}km → ${sets} 组变速：快段到 ${pT}/km，慢段回到 ${pE}/km，用路灯或路口当标记、不看表 → 冷身 ${cool}km。全程 ${total}km。比间歇自由，比节奏跑有趣。`,
+    };
+  }
+
+  if (kind === 'race') {
+    return {
+      ...shell,
+      paceKey: 'M',
+      paceText: `${pM}/km`,
+      title: `比赛配速跑 ${total}km${tag}`,
+      desc: `热身 ${warm}km → 主体 ${body}km @ ${pM}/km（${targetEv === 'FM' ? '全马' : '半马'}目标配速）→ 冷身 ${cool}km。让身体记住比赛那天该是什么节奏。`,
+    };
+  }
 
   if (phase === 'taper') {
     return {
-      distKm: total,
+      ...shell,
       paceKey: 'T',
       paceText: `${pT}/km`,
-      title: `减量 · 节奏跑 ${total}km`,
-      desc: `热身 ${warm}km → 节奏跑 ${body}km @ ${pT} → 冷身 ${cool}km。减量周不追求强度，保持腿感即可。`,
+      title: `减量 · 节奏跑 ${total}km${tag}`,
+      desc: `热身 ${warm}km → 主体节奏跑 ${body}km @ ${pT}/km → 冷身 ${cool}km。减量周不追强度，保持腿感即可。`,
     };
   }
 
-  const preferInterval = targetEv === '5K' || (targetEv === '10K' && phase !== 'base');
-
-  if (preferInterval && phase !== 'base') {
-    // 一组 = 800m 快 + 400m 慢跑恢复，最后一组不用慢跑收尾
-    const reps = Math.max(2, Math.min(10, Math.floor((body - 0.8) / 1.2) + 1));
-    return {
-      distKm: total,
-      paceKey: 'I',
-      paceText: `${pI}/km`,
-      title: `间歇 ${reps} × 800m${isPrimary ? '' : '（次课）'}`,
-      desc: `${reps} 组 800m @ ${pI}，组间慢跑 400m 恢复。全程共 ${total}km：前后各 ${warm}km 热身、${cool}km 冷身。撑不住就减组数，别降配速。`,
-    };
-  }
-
-  if (phase === 'peak' && (targetEv === 'HM' || targetEv === 'FM')) {
-    return {
-      distKm: total,
-      paceKey: 'M',
-      paceText: `${pM}/km`,
-      title: `比赛配速跑 ${total}km${isPrimary ? '' : '（次课）'}`,
-      desc: `热身 ${warm}km → 主体 ${body}km @ ${pM}（目标比赛配速）→ 冷身 ${cool}km。让身体记住比赛那天该是什么节奏。`,
-    };
-  }
-
-  const minutes = Math.round((body * paces.T) / 60);
+  const minutes = Math.max(6, Math.round((body * paces.T) / 60));
   return {
-    distKm: total,
+    ...shell,
     paceKey: 'T',
     paceText: `${pT}/km`,
-    title: `节奏跑 ${total}km${isPrimary ? '' : '（次课）'}`,
-    desc: `热身 ${warm}km → 主体 ${body}km @ ${pT}（约 ${minutes} 分钟）→ 冷身 ${cool}km。能说短句但不想说话，就是对的强度。`,
+    title: `节奏跑 ${total}km${tag}`,
+    desc: `热身 ${warm}km → 主体 ${body}km @ ${pT}/km（约 ${minutes} 分钟）→ 冷身 ${cool}km。能说短句但不想说话，就是对的强度。`,
   };
 }
 
@@ -466,13 +527,16 @@ export function generatePlan(opts) {
 
       const km = perDay[slotIdx];
       const isPrimary = slotIdx === tpl.quality[0];
-      const minKm = isPrimary ? MIN_QUALITY_PRIMARY : MIN_QUALITY_SECOND;
+      const isQuality = tpl.quality.includes(slotIdx);
 
-      // 分配到的距离撑不起一节像样的质量课，就老实改轻松跑
-      if (tpl.quality.includes(slotIdx) && km >= minKm) {
+      if (isQuality) {
+        // 不再用「这节课分到几公里」判断该不该有强度。
+        // 跑量统计不足只是记录少，不等于跑者只能跑轻松跑；
+        // 强度类型和配速按 VDOT（预测成绩同一水平）排，距离小就把课排短。
+        const kind = qualityKind(phase, w, isPrimary, tpl.quality.length, targetEv, isCutback);
         pushRun(weekStart, w, dow, phase, {
           type: 'quality',
-          ...makeQuality(phase, km, paces, targetEv, isPrimary),
+          ...makeQuality(phase, km, paces, targetEv, isPrimary, kind),
         });
       } else {
         pushRun(weekStart, w, dow, phase, {

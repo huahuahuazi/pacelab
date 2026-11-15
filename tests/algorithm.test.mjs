@@ -233,4 +233,53 @@ t('周跑量不超过上一周 10% 的红线，各档位都成立', () => {
   }
 });
 
+/* ---------------- 质量课不能因「跑量统计不足」被全降级 ---------------- */
+
+const KINDS = ['法特莱克', '加速跑', '间歇', '节奏跑'];
+
+t('低跑量（周均 0km）下，3/4/5 练都排得出四类质量课', () => {
+  for (const dpw of [3, 4, 5]) {
+    const p = generatePlan({ targetEv: '5K', vdot: 27.2, baseWeekKm: 0, daysPerWeek: dpw, weeks: 8 });
+    const q = p.days.filter((d) => d.type === 'quality');
+    assert.ok(q.length >= 6, `${dpw} 练只有 ${q.length} 节质量课，等于没排强度`);
+    for (const k of KINDS) {
+      assert.ok(q.some((d) => d.title.includes(k)), `${dpw} 练缺「${k}」`);
+    }
+  }
+});
+
+t('强度档位不删质量课类型，只改跑量', () => {
+  for (const it of ['light', 'normal', 'plus']) {
+    const p = generatePlan({ targetEv: '5K', vdot: 27.2, baseWeekKm: 10, daysPerWeek: 4, intensity: it, weeks: 8 });
+    const q = p.days.filter((d) => d.type === 'quality');
+    assert.ok(q.length >= 12, `${it} 只剩 ${q.length} 节质量课`);
+    for (const k of KINDS) {
+      assert.ok(q.some((d) => d.title.includes(k)), `${it} 缺「${k}」`);
+    }
+  }
+});
+
+t('质量课配速来自 VDOT（预测成绩水平），不是当前跑量', () => {
+  const a = generatePlan({ targetEv: '5K', vdot: 30, baseWeekKm: 0, daysPerWeek: 4, weeks: 8 });
+  const b = generatePlan({ targetEv: '5K', vdot: 50, baseWeekKm: 0, daysPerWeek: 4, weeks: 8 });
+  const pa = a.days.find((d) => d.type === 'quality').paceText;
+  const pb = b.days.find((d) => d.type === 'quality').paceText;
+  assert.notStrictEqual(pa, pb, `VDOT 30 与 50 配速不该相同（${pa} / ${pb}）`);
+});
+
+t('短距离质量课也要有组数，且每日距离之和仍等于总跑量', () => {
+  const p = generatePlan({ targetEv: '5K', vdot: 27.2, baseWeekKm: 0, daysPerWeek: 5, weeks: 12 });
+  const short = p.days.filter((d) => d.type === 'quality' && d.distKm < 3.5);
+  assert.ok(short.length > 0, '应存在短距离质量课');
+  for (const d of short) {
+    // 组数可能写在标题（间歇/加速跑）也可能在说明里（法特莱克的「N 组变速」），
+    // 节奏跑则是「主体 Xkm」。三种都算有可执行内容，不能只是「轻松跑 Nkm」。
+    const hasStructure = /\d+\s*×/.test(d.title) || /\d+\s*组/.test(d.desc) || /主体/.test(d.desc);
+    assert.ok(hasStructure, `短课「${d.title}」没有具体训练内容`);
+    assert.ok(d.distKm > 0 && d.paceText, '短课缺距离或配速');
+  }
+  const sum = p.days.reduce((s, d) => s + (Number(d.distKm) || 0), 0);
+  assert.ok(Math.abs(sum - p.totalKm) < 2, `每日之和 ${sum.toFixed(1)} 与总跑量 ${p.totalKm} 对不上`);
+});
+
 console.log(`\n${pass} 项通过${process.exitCode ? '，存在失败' : ''}\n`);
