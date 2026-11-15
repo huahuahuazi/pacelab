@@ -201,12 +201,29 @@ export function generatePlan(opts) {
   if (vdot > 90) throw new Error('VDOT 超出模型可靠范围，请检查数据');
 
   const paces = trainingPaces(vdot);
-  const weeks = spec.weeks;
+
+  // 强度档位：适量版 = 用户当前跑量直接推算，休闲/加量在其上缩放。
+  // 只缩放跑量起点，后面「周曲线 → 每日分配」全链路自动跟随，
+  // 不需要去改每一天的距离公式 —— 那才是容易改出前后矛盾的地方。
+  const INTENSITY = {
+    light: { kmScale: 0.78, label: '休闲版' },
+    normal: { kmScale: 1.0, label: '适量版' },
+    plus: { kmScale: 1.22, label: '加量版' },
+  };
+  const intensityKey = INTENSITY[opts.intensity] ? opts.intensity : 'normal';
+  const intensity = INTENSITY[intensityKey];
+
+  // 周数可自选；不填就按目标距离的默认周期。夹在 4~24 周，
+  // 低于 4 周排不出「基础→进展→巅峰→减量」四阶段，高于 24 周模型外推不可靠。
+  const weeks = Math.max(4, Math.min(24, Math.round(Number(opts.weeks) || spec.weeks)));
 
   // 起点：用户实际周跑量；天花板：项目最低有效跑量与 1.6 倍增幅取较大者
   const userKm = Number(opts.baseWeekKm) || 0;
-  const baseKm = Math.max(MIN_BASE_KM, r1(userKm));
-  const peakKm = Math.min(spec.capacity, Math.max(spec.minPeak, baseKm * 1.6));
+  // 档位只作用于真实跑量，MIN_BASE_KM 保底不动：
+  // 休闲版再休闲，也不能低到「排了等于没排」。
+  const baseKm = r1(Math.max(MIN_BASE_KM, userKm * intensity.kmScale));
+  const minPeak = spec.minPeak * intensity.kmScale;
+  const peakKm = Math.min(spec.capacity * intensity.kmScale, Math.max(minPeak, baseKm * 1.6));
 
   // 跑量撑不起用户选的训练频率时，自动降到 3 练。计划要能跑完，不能只是排得好看。
   const requestedDpw = Math.max(3, Math.min(5, Number(opts.daysPerWeek) || 4));
@@ -419,6 +436,10 @@ export function generatePlan(opts) {
     targetLabel: EVENT_SHORT[targetEv],
     vdotAtCreation: vdot,
     weeks,
+    intensity: intensityKey,
+    intensityLabel: intensity.label,
+    // 0 表示「跟随目标距离默认值」，UI 上不用再解释一遍
+    weeksRequested: Math.round(Number(opts.weeks) || 0),
     baseKm: r1(baseKm),
     peakKm: r1(realPeak),
     totalKm: Math.round(totalKm),

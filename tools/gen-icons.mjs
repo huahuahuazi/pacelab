@@ -77,19 +77,27 @@ function connect(u) {
 }
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* 三个变体的来源 */
+/* 四个变体的来源。
+   关键：CDP 截图默认会把透明区域铺白，而用户要的是黑底。
+   所以 round/square/circle 一律在 SVG 最底层铺一张「无圆角」的深色矩形，
+   把四角也填黑；只有 foreground 保持真透明（配合 omitBackground）。 */
 const base = fs.readFileSync(path.join(ROOT, 'assets', 'icon.svg'), 'utf8');
+const BG = '<rect width="512" height="512" fill="#0b0d10"/>';
+const withBlackCorners = (svg) =>
+  svg.replace('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">',
+              '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">\n  ' + BG);
+
 const variants = {
-  // 网页 / PWA：带圆角，自己看着就是个 App 图标
-  round: base,
-  // 传统 launcher 图标：直角，交给系统遮罩（自己带圆角会在方形遮罩里露出四角）
-  square: base.replace('rx="116"', 'rx="0"'),
-  // 圆形 launcher 图标（Android 7.1+ 的 roundIcon）
-  circle: base.replace(
+  // 网页 / PWA：圆角轮廓，但四角同为深色，不会露出白
+  round: withBlackCorners(base),
+  // 传统 launcher 图标：直角
+  square: withBlackCorners(base.replace('rx="116"', 'rx="0"')),
+  // 圆形 launcher 图标（Android 7.1+ 的 roundIcon）：圆外四角同样铺深色
+  circle: withBlackCorners(base.replace(
     '<rect width="512" height="512" rx="116" fill="#0b0d10"/>',
     '<circle cx="256" cy="256" r="256" fill="#0b0d10"/>'
-  ),
-  // 自适应图标前景：透明背景
+  )),
+  // 自适应图标前景：必须真透明，否则会盖住系统背景色变成白块
   foreground: fs.readFileSync(path.join(ROOT, 'assets', 'icon-foreground.svg'), 'utf8'),
 };
 
@@ -153,6 +161,11 @@ const TARGETS = [
       deviceScaleFactor: 1,
       mobile: false,
     });
+    // 让页面底色完全透明，截图时才不会把 alpha=0 的区域烘成不透明白。
+    // 之前就是漏了这两个：四角铺白、前景层整张变白块。
+    await cdp.send('Emulation.setDefaultBackgroundColorOverride', {
+      color: { r: 0, g: 0, b: 0, a: 0 },
+    });
     await cdp.send('Page.navigate', { url: 'about:blank' });
     await cdp.send('Runtime.evaluate', {
       expression: `(function(){
@@ -165,7 +178,7 @@ const TARGETS = [
       returnByValue: true,
     });
     await wait(120);
-    const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+    const shot = await cdp.send('Page.captureScreenshot', { format: 'png', omitBackground: true });
     const abs = path.join(ROOT, t.out);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, Buffer.from(shot.data, 'base64'));

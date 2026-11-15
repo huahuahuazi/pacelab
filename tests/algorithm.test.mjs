@@ -153,4 +153,60 @@ t('起始日本来就是周一时不做任何挪动', () => {
   assert.strictEqual(p.startAligned, false);
 });
 
+/* ---------------- 强度档位与自选周数 ---------------- */
+
+const basePlan = (extra) =>
+  generatePlan({ targetEv: '5K', vdot: 45, baseWeekKm: 40, daysPerWeek: 4, startDate: '2026-11-16', ...extra });
+
+t('三档强度：休闲 < 适量 < 加量，且适量版等于不带参数时的结果', () => {
+  const light = basePlan({ intensity: 'light' });
+  const normal = basePlan({ intensity: 'normal' });
+  const plain = basePlan({});
+  const plus = basePlan({ intensity: 'plus' });
+  assert.ok(light.totalKm < normal.totalKm, `休闲 ${light.totalKm} 应小于适量 ${normal.totalKm}`);
+  assert.ok(normal.totalKm < plus.totalKm, `适量 ${normal.totalKm} 应小于加量 ${plus.totalKm}`);
+  assert.strictEqual(normal.totalKm, plain.totalKm, '适量版必须等于默认');
+  assert.strictEqual(light.intensityLabel, '休闲版');
+  assert.strictEqual(normal.intensityLabel, '适量版');
+  assert.strictEqual(plus.intensityLabel, '加量版');
+});
+
+t('未知档位回落到适量版，不抛错', () => {
+  const p = basePlan({ intensity: 'garbage' });
+  assert.strictEqual(p.intensity, 'normal');
+  assert.strictEqual(p.totalKm, basePlan({}).totalKm);
+});
+
+t('自选周数生效，并且每天的日期仍对得上星期', () => {
+  for (const w of [4, 8, 12, 20]) {
+    const p = basePlan({ weeks: w });
+    assert.strictEqual(p.weeks, w, `要求 ${w} 周，实际 ${p.weeks}`);
+    assert.strictEqual(p.days.length, w * 7, '天数应等于周数×7');
+    for (const d of p.days) {
+      const wd = new Date(d.date + 'T00:00:00').getDay();
+      assert.strictEqual(d.dow, (wd + 6) % 7, `${d.date} 星期错位`);
+    }
+  }
+});
+
+t('周数越界会被夹到 4~24 周', () => {
+  assert.strictEqual(basePlan({ weeks: 1 }).weeks, 4);
+  assert.strictEqual(basePlan({ weeks: 99 }).weeks, 24);
+  assert.strictEqual(basePlan({ weeks: 0 }).weeks, 8, '0 表示跟随 5K 默认的 8 周');
+  assert.strictEqual(basePlan({ weeks: 0, targetEv: 'FM' }).weeks, 16, '全马默认 16 周');
+});
+
+t('周跑量不超过上一周 10% 的红线，各档位都成立', () => {
+  for (const it of ['light', 'normal', 'plus']) {
+    const p = basePlan({ intensity: it, weeks: 12 });
+    const regular = p.weekKms.slice(0, p.weeks - 1);
+    for (let i = 1; i < regular.length; i++) {
+      assert.ok(
+        regular[i] <= regular[i - 1] * 1.1 + 0.11,
+        `${it} 第 ${i + 1} 周 ${regular[i]}km 比上周 ${regular[i - 1]}km 涨超 10%`
+      );
+    }
+  }
+});
+
 console.log(`\n${pass} 项通过${process.exitCode ? '，存在失败' : ''}\n`);

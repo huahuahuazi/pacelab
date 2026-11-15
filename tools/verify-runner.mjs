@@ -114,15 +114,20 @@ const check = (ok, msg, extra) => { if (!ok) bad++; console.log(`  ${ok ? 'PASS'
   const ops = async () =>
     evaluate(`Array.prototype.slice.call(document.querySelectorAll('.runner-frames img'))
       .map(function(i){return parseFloat(i.style.opacity||'0')})`);
-  const oA = await ops();
-  await wait(260);
-  const oB = await ops();
-  const visA = oA.filter(function (v) { return v > 0.02; }).length;
-  const midA = oA.filter(function (v) { return v > 0.05 && v < 0.95; }).length;
-  const sumA = oA.reduce(function (s, v) { return s + v; }, 0);
-  check(visA >= 2, '同时有两帧在画面里（不是硬切）', visA + ' 帧可见');
-  check(sumA > 0.9 && sumA < 1.1, '两帧透明度互补相加约等于 1', sumA.toFixed(3));
-  check(oA.join(',') !== oB.join(','), '透明度随时间连续变化（插值生效）', midA + ' 帧处于中间态');
+  // 三次 ease 会让两端停留更久，单次采样很容易正好落在「接近纯帧」的时刻。
+  // 所以多次采样，只要出现过一次两帧同处中间态，就说明插值确实在发生。
+  const samples = [];
+  for (let k = 0; k < 10; k++) {
+    samples.push(await ops());
+    await wait(45);
+  }
+  const anyBlend = samples.some((s) => s.filter((v) => v > 0.05 && v < 0.95).length === 2);
+  const sums = samples.map((s) => s.reduce((a, v) => a + v, 0));
+  const sumsOk = sums.every((v) => v > 0.9 && v < 1.1);
+  const changed = samples[0].join(',') !== samples[samples.length - 1].join(',');
+  check(anyBlend, '采样期间出现过两帧同时可见（不是硬切）', `${samples.length} 次采样`);
+  check(sumsOk, '每次采样两帧透明度互补相加约等于 1', `范围 ${Math.min(...sums).toFixed(3)}~${Math.max(...sums).toFixed(3)}`);
+  check(changed, '透明度随时间连续变化（插值生效）');
 
   // 隔一小段时间截两次同一区域，比像素
   const clip = { x: info.box.x, y: info.box.y, width: info.box.w, height: info.box.h, scale: 2 };

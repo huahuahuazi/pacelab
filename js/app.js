@@ -130,14 +130,16 @@ function heroCard() {
   const lv = stats.level;
   return `
   <div class="hero">
-    <div class="hero-body">
-      <div class="label">当前跑步水平</div>
-      <div class="vdot"><b>${stats.currentVdot.toFixed(1)}</b><span>VDOT</span></div>
-      <div class="level-tag ${lv.tier === 'mid' ? 'mid' : ''}">${esc(lv.name)}</div>
-      <p class="desc">${esc(lv.desc)}</p>
-      <div class="meter"><i style="width:${lv.pct.toFixed(1)}%"></i></div>
+    <div class="hero-grid">
+      <div class="hero-visual">${runnerFigure()}</div>
+      <div class="hero-data">
+        <div class="label">当前跑步水平</div>
+        <div class="vdot"><b>${stats.currentVdot.toFixed(1)}</b><span>VDOT</span></div>
+        <div class="level-tag ${lv.tier === 'mid' ? 'mid' : ''}">${esc(lv.name)}</div>
+        <p class="desc">${esc(lv.desc)}</p>
+        <div class="meter"><i style="width:${lv.pct.toFixed(1)}%"></i></div>
+      </div>
     </div>
-    ${runnerFigure()}
     <div class="hero-foot">
       <span>本周 <b>${stats.weekKm.toFixed(1)}</b> km</span>
       <span>近30天 <b>${stats.last30Km.toFixed(1)}</b> km</span>
@@ -183,16 +185,16 @@ function runnerFigure() {
   <div class="runner-art">
     <div class="runner-frames">${frames}</div>
     <div class="runner-track"></div>
-    <svg class="mood-layer" viewBox="0 0 150 134" aria-hidden="true">
+    <svg class="mood-layer" viewBox="0 0 118 160" aria-hidden="true">
       <g class="mood-bubble" data-act="mood:info">
-        <rect x="8" y="2" width="134" height="38" rx="10"
-          fill="rgba(9,12,14,0.94)" stroke="${tone}" stroke-width="1.2" stroke-opacity="0.75"/>
-        <text x="75" y="17" text-anchor="middle" font-size="8.5" fill="var(--text-faint)" letter-spacing="0.2">${esc(sub)}</text>
-        <text x="75" y="32" text-anchor="middle" font-size="11.5" font-weight="600" fill="${tone}">${esc(mood.text)}</text>
-        <path d="M126 42 Q124 52 121 62" fill="none" stroke="${tone}" stroke-width="1.2"
+        <rect x="2" y="2" width="114" height="34" rx="9"
+          fill="rgba(9,12,14,0.94)" stroke="${tone}" stroke-width="1.1" stroke-opacity="0.75"/>
+        <text x="59" y="15" text-anchor="middle" font-size="8" fill="var(--text-faint)">${esc(sub)}</text>
+        <text x="59" y="28" text-anchor="middle" font-size="10.5" font-weight="600" fill="${tone}">${esc(mood.text)}</text>
+        <path d="M59 38 Q56 43 52 47" fill="none" stroke="${tone}" stroke-width="1.1"
           stroke-dasharray="3 3" stroke-opacity="0.8"/>
-        <circle cx="121" cy="62" r="2.6" fill="${tone}">
-          <animate attributeName="r" values="2;3.2;2" dur="2s" repeatCount="indefinite"/>
+        <circle cx="52" cy="47" r="2.4" fill="${tone}">
+          <animate attributeName="r" values="2;3;2" dur="2s" repeatCount="indefinite"/>
         </circle>
       </g>
     </svg>
@@ -252,10 +254,12 @@ function startRunnerAnim() {
     const t = phase - i;
     const j = (i + 1) % N;
 
-    // 全程插值，不留「纯帧」时间片 —— 留了就会在那一小段退化成硬切。
-    // smoothstep 本身端点导数为 0，两端自然放慢，落脚那一下依然是「踩点」的，
-    // 不需要额外靠停顿来做。
-    const blend = t * t * (3 - 2 * t);
+    // 三次 ease：比 smoothstep 更快穿过 50/50 的中间态。
+    // 手绘线条细，两帧各半叠加的时间一长就会看成「重影糊成一团」，
+    // 让过渡快一点、两端停留久一点，既保留连续运动又不糊。
+    const blend = t < 0.5
+      ? 4 * t * t * t
+      : 1 - 4 * (1 - t) * (1 - t) * (1 - t);
 
     if (i !== lastI || j !== lastJ) {
       for (let k = 0; k < N; k++) {
@@ -264,13 +268,10 @@ function startRunnerAnim() {
       lastI = i;
       lastJ = j;
     }
+    // 不加动态模糊：手绘线条本来就细，一糊就成一团，
+    // 丝滑靠连续插值已经够了，不需要靠模糊去伪造运动感。
     imgs[i].style.opacity = (1 - blend).toFixed(3);
     imgs[j].style.opacity = blend.toFixed(3);
-
-    // 只有过渡中间才需要模糊，落在纯帧上时保持清晰
-    const b = Math.sin(t * Math.PI) * 0.7;
-    imgs[i].style.filter = b > 0.05 ? `blur(${b.toFixed(2)}px)` : 'none';
-    imgs[j].style.filter = b > 0.05 ? `blur(${b.toFixed(2)}px)` : 'none';
 
     runnerRAF = requestAnimationFrame(tick);
   };
@@ -514,7 +515,7 @@ function viewPlan() {
       <div class="row">
         <div>
           <h2>${esc(plan.targetLabel)} 训练计划</h2>
-          <p class="meta">${plan.weeks} 周 · 每周 ${plan.daysPerWeek} 练 · 共 ${plan.totalKm}km<br>起点 ${plan.baseKm}km/周 → 峰值 ${plan.peakKm}km/周${
+          <p class="meta">${plan.weeks} 周 · 每周 ${plan.daysPerWeek} 练 · 共 ${plan.totalKm}km${plan.intensityLabel ? ` · ${esc(plan.intensityLabel)}` : ''}<br>起点 ${plan.baseKm}km/周 → 峰值 ${plan.peakKm}km/周${
             plan.requestedDpw && plan.daysPerWeek < plan.requestedDpw
               ? `<br><span style="color:var(--warn)">当前跑量撑不起每周 ${plan.requestedDpw} 练，已自动降为 ${plan.daysPerWeek} 练。先把跑量堆起来再加频次。</span>`
               : ''
@@ -778,6 +779,16 @@ function modalPlanNew() {
       </div>
 
       <div class="field">
+        <label>训练强度 <span class="opt">按身体状态选</span></label>
+        <div class="seg" id="seg-intensity">
+          <button data-act="seg" data-group="intensity" data-value="light">休闲版</button>
+          <button class="on" data-act="seg" data-group="intensity" data-value="normal">适量版</button>
+          <button data-act="seg" data-group="intensity" data-value="plus">加量版</button>
+        </div>
+        <div class="hint">适量版按你当前跑量推算；休闲版约 −22%，加量版约 +22%。最近累、睡不好就选休闲版。</div>
+      </div>
+
+      <div class="field">
         <label>每周训练天数</label>
         <div class="seg" id="seg-dpw">
           <button data-act="seg" data-group="dpw" data-value="3">3 练</button>
@@ -785,6 +796,19 @@ function modalPlanNew() {
           <button data-act="seg" data-group="dpw" data-value="5">5 练</button>
         </div>
         <div class="hint">3 练适合刚起步，4 练是业余跑者性价比最高的频率。</div>
+      </div>
+
+      <div class="field">
+        <label>训练周数 <span class="opt">默认按目标距离</span></label>
+        <div class="seg seg-grid" id="seg-weeks">
+          <button class="on" data-act="seg" data-group="weeks" data-value="0">跟随默认</button>
+          <button data-act="seg" data-group="weeks" data-value="4">4 周</button>
+          <button data-act="seg" data-group="weeks" data-value="8">8 周</button>
+          <button data-act="seg" data-group="weeks" data-value="12">12 周</button>
+          <button data-act="seg" data-group="weeks" data-value="16">16 周</button>
+          <button data-act="seg" data-group="weeks" data-value="20">20 周</button>
+        </div>
+        <div class="hint">默认：5K 8 周 / 10K 10 周 / 半马 12 周 / 全马 16 周。周数越短，每周加量越陡。</div>
       </div>
 
       <div class="field">
@@ -1280,9 +1304,14 @@ function handleClick(e) {
     case 'plan:gen': {
       const evBtn = document.querySelector('#seg-ev button.on');
       const dpwBtn = document.querySelector('#seg-dpw button.on');
+      const itBtn = document.querySelector('#seg-intensity button.on');
+      const wkBtn = document.querySelector('#seg-weeks button.on');
       const startEl = document.getElementById('f-start');
       const ev = evBtn ? evBtn.dataset.value : '10K';
       const dpw = dpwBtn ? Number(dpwBtn.dataset.value) : 4;
+      const intensity = itBtn ? itBtn.dataset.value : 'normal';
+      // 0 = 跟随目标距离的默认周数，不传 weeks 让 plan.js 自己按 SPEC 取
+      const weeks = wkBtn ? Number(wkBtn.dataset.value) : 0;
       const baseWeekKm = stats.last30Km / 4.3 || 0;
       try {
         const plan = generatePlan({
@@ -1290,6 +1319,8 @@ function handleClick(e) {
           vdot: stats.currentVdot,
           baseWeekKm,
           daysPerWeek: dpw,
+          intensity,
+          weeks: weeks || undefined,
           startDate: startEl ? startEl.value : undefined,
         });
         state.plans = state.plans.filter((p) => p.id !== state.activePlanId);
@@ -1315,7 +1346,7 @@ function handleClick(e) {
           notes.push(`当前跑量撑不起 ${plan.requestedDpw} 练，按 ${plan.daysPerWeek} 练排`);
         }
         toast(
-          `已生成 ${plan.weeks} 周 ${plan.targetLabel} 计划` +
+          `已生成 ${plan.weeks} 周 ${plan.targetLabel} · ${plan.intensityLabel} 计划` +
             (notes.length ? ` · ${notes.join(' · ')}` : '')
         );
       } catch (err) {

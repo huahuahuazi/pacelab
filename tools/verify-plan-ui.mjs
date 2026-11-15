@@ -230,6 +230,7 @@ const check = (ok, msg, extra) => {
       dpw: plan ? plan.daysPerWeek : 0,
       req: plan ? plan.requestedDpw : 0,
       start: plan ? plan.startDate : '',
+      total: plan ? plan.totalKm : 0,
       aligned: plan ? plan.startAligned : false
     };
   })()`);
@@ -244,6 +245,63 @@ const check = (ok, msg, extra) => {
   // 关键是 requestedDpw 要留住用户的选择，界面才能解释"为什么给你排了 3 练"。
   check(result.dpw === 3 && result.req === 5, '跑量不足时降为 3 练，但记住用户选的 5 练', `${result.dpw} 练 / 用户选 ${result.req}`);
   check(!result.aligned || result.start.slice(8) === '16', '起始日对齐到周一', result.start);
+
+  /* ---- 第二轮：强度档位 + 自选周数，真点按钮走完整链路 ---- */
+  console.log('\n[强度档位与自选周数]');
+
+  await evalJs(`(function(){
+    var s=JSON.parse(localStorage.getItem('pacelab.state.v1'));
+    s.plans=[]; s.activePlanId=null;
+    localStorage.setItem('pacelab.state.v1', JSON.stringify(s));
+    return 1;
+  })()`);
+  await cdp.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/index.html?r=${Date.now() + 7}#plan` });
+  await wait(1200);
+
+  const open2 = await evalJs(`(function(){
+    var b=document.querySelector('[data-act="open:planNew"]');
+    if(!b) return 'no-button';
+    b.click();
+    return document.querySelector('#seg-intensity') && document.querySelector('#seg-weeks') ? 'ok' : 'no-new-seg';
+  })()`);
+  check(open2 === 'ok', '新弹层里有强度档位和周数两组控件', open2);
+  await wait(250);
+
+  const picked = await evalJs(`(function(){
+    var it=document.querySelector('#seg-intensity button[data-value="light"]');
+    var wk=document.querySelector('#seg-weeks button[data-value="12"]');
+    if(!it||!wk) return 'no-button';
+    it.click(); wk.click();
+    var ion=document.querySelector('#seg-intensity button.on');
+    var won=document.querySelector('#seg-weeks button.on');
+    return (ion?ion.dataset.value:'-')+'/'+(won?won.dataset.value:'-');
+  })()`);
+  check(picked === 'light/12', '点「休闲版 + 12 周」后选中态正确', picked);
+
+  const gen2 = await evalJs(`(function(){
+    var b=document.querySelector('[data-act="plan:gen"]');
+    if(!b) return 'no-gen-button';
+    b.click(); return 'clicked';
+  })()`);
+  check(gen2 === 'clicked', '第二轮的「生成」按钮可点');
+  await wait(900);
+
+  const r2 = await evalJs(`(function(){
+    var s=JSON.parse(localStorage.getItem('pacelab.state.v1'));
+    var p=s.plans[s.plans.length-1];
+    return p?{intensity:p.intensity,label:p.intensityLabel,weeks:p.weeks,total:p.totalKm,reqWeeks:p.weeksRequested}:null;
+  })()`);
+  check(!!r2, '第二轮计划已入库');
+  if (r2) {
+    check(r2.intensity === 'light', '强度档位是休闲版', r2.intensity);
+    check(r2.weeks === 12, '训练周数是用户选的 12 周', r2.weeks + ' 周');
+    check(r2.reqWeeks === 12, '原始选择被记录下来', String(r2.reqWeeks));
+    // 两轮周数不同（8 周 vs 12 周），比总量没有意义，要比较周均跑量
+    const avgLight = r2.total / r2.weeks;
+    const avgNormal = result.total / result.weeks;
+    check(avgLight < avgNormal, '休闲版周均跑量小于上一轮的适量版',
+      `${avgLight.toFixed(1)} < ${avgNormal.toFixed(1)} km/周`);
+  }
 
   console.log(`\n${bad ? bad + ' 项失败' : '全部通过'}\n`);
 
