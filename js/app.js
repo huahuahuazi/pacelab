@@ -931,6 +931,12 @@ function modalPlanImport() {
         </table>
       </div>
       <div class="hint">改标题即可改课型（写「间歇」「节奏」「长距离」「休息」都能认）。导入会替换当前训练计划。</div>`;
+  } else if (st.stage === 'paste') {
+    body = `
+      <p class="sheet-sub">把课表文字粘进来，一行一天。识别规则和文件导入同一套。</p>
+      <textarea class="input" id="pi-paste" rows="9" style="width:100%;resize:vertical;font-size:12.5px;line-height:1.6"
+        placeholder="周一 轻松跑 8km 6'30/km&#10;周二 间歇 6×800m 10km&#10;周三 休息&#10;周日 长距离 18km"></textarea>
+      <div class="hint">认星期、日期、距离(km/公里)、配速(6'30"/km)，也认「间歇/节奏/法特莱克/加速跑/长距离/休息」。</div>`;
   } else {
     body = `
       <p class="sheet-sub">拍照或选一个文件，自动读出逐日课表。识别结果会先给你逐行核对，不会直接入库。</p>
@@ -939,8 +945,16 @@ function modalPlanImport() {
         <small>照片 / PDF / Word(.docx) / Excel(.xlsx .xls .csv)</small>
         <input type="file" id="f-plan-file" accept="image/*,.pdf,.docx,.xlsx,.xls,.csv" class="file-tap" />
       </div>
-      <div class="hint">教练发的课表截图、Excel 周计划、Word 训练表、PDF 备赛计划都行。全部在本机识别，不联网、不上传。</div>`;
+      <div class="hint">教练发的课表截图、Excel 周计划、Word 训练表、PDF 备赛计划都行。全部在本机识别，不联网、不上传。</div>
+      <button class="btn ghost mt8" data-act="plan:importPaste" style="width:100%">没有文件？直接粘贴课表文字</button>`;
   }
+
+  const primary =
+    st.stage === 'preview'
+      ? '<button class="btn primary" data-act="plan:importConfirm">确认导入</button>'
+      : st.stage === 'paste'
+        ? '<button class="btn primary" data-act="plan:importPasteParse">解析这段文字</button>'
+        : '';
 
   return `
   <div class="mask" data-act="modal:bg">
@@ -950,7 +964,7 @@ function modalPlanImport() {
       ${body}
       <div class="row-btns mt16">
         <button class="btn ghost" data-act="modal:close">取消</button>
-        ${st.stage === 'preview' ? '<button class="btn primary" data-act="plan:importConfirm">确认导入</button>' : ''}
+        ${primary}
       </div>
     </div>
   </div>`;
@@ -980,10 +994,9 @@ function collectImportPreview() {
   return rows;
 }
 
-/** 文件选择后的完整识别流程。render() 会换掉 input，所以先把 file 存下来再 await。 */
-async function handlePlanFileChange(e) {
-  const file = e.target.files && e.target.files[0];
-  if (!file) return;
+/** 真正跑识别。文件选择器和「分享进 App」两条来路都走这里，只写一遍。 */
+async function startPlanImport(file) {
+  ui.modal = { type: 'planImport' };
   ui.planImport = { stage: 'working', fileName: file.name, progress: '加载解析引擎…' };
   render();
 
@@ -1014,6 +1027,51 @@ async function handlePlanFileChange(e) {
   }
   render();
 }
+
+/** 文件选择后的完整识别流程。render() 会换掉 input，所以先把 file 存下来再 await。 */
+async function handlePlanFileChange(e) {
+  const file = e.target.files && e.target.files[0];
+  if (file) await startPlanImport(file);
+}
+
+/**
+ * 检查「从别的 App 分享进来」的文件。
+ * 微信/QQ/文件管理器 → 分享到 PaceLab → 这里接住，直接进导入流程。
+ * 原生侧只给一次（取完即清），所以不会重复弹。
+ */
+function checkSharedFile() {
+  const bridge = window.AndroidBridge;
+  if (!bridge || typeof bridge.takeShared !== 'function') return false;
+  let raw = '';
+  try {
+    raw = bridge.takeShared();
+  } catch (err) {
+    return false;
+  }
+  if (!raw) return false;
+
+  const first = raw.indexOf('\n');
+  const second = raw.indexOf('\n', first + 1);
+  if (first < 0 || second < 0) return false;
+  const name = raw.slice(0, first) || 'shared.bin';
+  const mime = raw.slice(first + 1, second);
+  const b64 = raw.slice(second + 1);
+
+  try {
+    const bin = atob(b64);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    const file = new File([arr], name, { type: mime || '' });
+    startPlanImport(file);
+    return true;
+  } catch (err) {
+    toast('分享的文件读不出来，试试用文件选择器导入');
+    return false;
+  }
+}
+
+// 原生侧在 onNewIntent 里回调这个名字，App 已在前台时再次分享也能接住
+window.__paceLabCheckShare = checkSharedFile;
 
 /** 生成并落盘。直接生成、确认后生成、采用建议生成都走这一条。 */
 function doGeneratePlan(opts) {
@@ -1660,6 +1718,29 @@ function handleClick(e) {
       break;
     }
 
+    case 'plan:importPaste': {
+      const keep = ui.planImport || {};
+      ui.planImport = { stage: 'paste', fileName: keep.fileName || '粘贴的课表' };
+      render();
+      break;
+    }
+
+    case 'plan:importPasteParse': {
+      const box = document.getElementById('pi-paste');
+      const text = box ? box.value : '';
+      const parsed = parsePlanRows([], text);
+      if (!parsed.entries.length) {
+        toast('这段文字里没认出课表，检查是不是按「周一 轻松跑 8km」这样写的');
+        break;
+      }
+      ui.planImport = {
+        stage: 'preview', fileName: '粘贴的课表', entries: parsed.entries,
+        startDate: parsed.startDate, source: 'paste',
+      };
+      render();
+      break;
+    }
+
     case 'plan:importDelRow': {
       const rows = collectImportPreview();
       const i = Number(el.dataset.i);
@@ -2134,6 +2215,9 @@ document.addEventListener('change', (e) => {
 });
 
 render();
+
+// 冷启动如果是「分享到 PaceLab」进来的，这里直接接手，用户不用再去翻文件管理器
+checkSharedFile();
 
 // 安卓壳里资源全在本地，Service Worker 没有意义还白占内存，直接跳过
 if ('serviceWorker' in navigator && !window.AndroidBridge) {

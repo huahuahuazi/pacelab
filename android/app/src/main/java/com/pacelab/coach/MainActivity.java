@@ -26,9 +26,16 @@ import android.widget.Toast;
 import androidx.webkit.WebViewAssetLoader;
 
 import java.io.File;
+import java.io.ByteArrayOutputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.List;
 import java.nio.charset.StandardCharsets;
+import android.database.Cursor;
+import android.provider.OpenableColumns;
+import android.util.Base64;
 
 /**
  * 单 Activity 壳：只做三件事 —— 加载本地网页、接住文件选择、把导出文件落盘。
@@ -48,6 +55,16 @@ public class MainActivity extends Activity {
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
     private long lastBackAt = 0;
+
+    /**
+     * 从「分享」或「用其他应用打开」送进来的文件，先放内存等网页来取。
+     * 不落盘是因为计划文件通常几十 KB，没必要在缓存目录里留垃圾；
+     * 8MB 上限是防呆 —— 再大 base64 过桥会把 WebView 卡死。
+     */
+    private static final int MAX_SHARE_BYTES = 8 * 1024 * 1024;
+    private byte[] shareData = null;
+    private String shareName = null;
+    private String shareMime = null;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -122,30 +139,60 @@ public class MainActivity extends Activity {
                 }
                 fileCallback = callback;
 
+                // 网页里 <input accept="image/*,.pdf,.docx,.xlsx"> 的真实类型要带到系统选择器，
+                // 否则一律只能选图片 —— 训练计划导入的 PDF/Word/Excel 就永远选不到。
+                // 网页可能给 MIME（image/*）也可能给扩展名（.docx/.xlsx），这里统一转成 MIME；
+                // 转不出来的直接放开成 */*，让用户自己挑，总比选不到强。
+                List<String> mimes = new ArrayList<String>();
+                String[] accept = params == null ? null : params.getAcceptTypes();
+                boolean anyFile = accept == null || accept.length == 0;
+                if (accept != null) {
+                    for (String a : accept) {
+                        if (a == null) continue;
+                        String s = a.trim().toLowerCase();
+                        if (s.isEmpty() || s.equals("*/*") || s.equals("*")) {
+                            anyFile = true;
+                            break;
+                        }
+                        if (s.startsWith(".")) {
+                            String m = extToMime(s);
+                            if (m == null) { anyFile = true; break; }
+                            mimes.add(m);
+                        } else if (s.contains("/")) {
+                            mimes.add(s);
+                        }
+                    }
+                }
+
                 // 优先用 ACTION_OPEN_DOCUMENT：它是官方给"选文件"设计的，
                 // 会返回带读权限的内容 URI，WebView 能直接读。
                 // 国产 ROM 上部分机型没有这个 Activity，再退回 ACTION_GET_CONTENT。
-                Intent intent = null;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-                    intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-                    intent.addCategory(Intent.CATEGORY_OPENABLE);
-                    intent.setType("image/*");
+                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                if (anyFile || mimes.isEmpty()) {
+                    intent.setType("*/*");
+                } else {
+                    intent.setType(mimes.size() == 1 ? mimes.get(0) : "*/*");
+                    intent.putExtra(Intent.EXTRA_MIME_TYPES, mimes.toArray(new String[0]));
                 }
-                if (intent == null || intent.resolveActivity(getPackageManager()) == null) {
+                if (intent.resolveActivity(getPackageManager()) == null) {
                     intent = new Intent(Intent.ACTION_GET_CONTENT);
                     intent.addCategory(Intent.CATEGORY_OPENABLE);
-                    intent.setType("image/*");
+                    intent.setType(anyFile || mimes.isEmpty() ? "*/*" : mimes.get(0));
+                    if (!anyFile && !mimes.isEmpty()) {
+                        intent.putExtra(Intent.EXTRA_MIME_TYPES, mimes.toArray(new String[0]));
+                    }
                 }
                 intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                 intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false);
 
                 try {
-                    startActivityForResult(Intent.createChooser(intent, "选择跑步截图"), REQ_FILE);
+                    startActivityForResult(Intent.createChooser(intent, "选择文件"), REQ_FILE);
                     return true;
                 } catch (Exception e) {
                     fileCallback = null;
                     callback.onReceiveValue(null);
-                    Toast.makeText(MainActivity.this, "打不开相册，请手动填写数据", Toast.LENGTH_LONG).show();
+                    Toast.makeText(MainActivity.this, "打不开文件选择器，请手动填写", Toast.LENGTH_LONG).show();
                     return false;
                 }
             }
@@ -166,11 +213,108 @@ public class MainActivity extends Activity {
             WebView.setWebContentsDebuggingEnabled(true);
         }
 
+        // 冷启动时如果是「分享到 PaceLab」进来的，先把文件收下，
+        // 网页加载完会自己来取（PaceLabShare.takeShared）
+        handleIncomingIntent(getIntent());
+
         if (savedInstanceState == null) {
             web.loadUrl(START_URL);
         } else {
             web.restoreState(savedInstanceState);
         }
+    }
+
+    /**
+     * 接住「分享」/「用其他应用打开」的文件。
+     * 微信、QQ、文件管理器都能把文件送到这里，用户不用再在文件管理器里翻目录。
+     */
+    private void handleIncomingIntent(Intent intent) {
+        if (intent == null) return;
+        Uri uri = null;
+        String action = intent.getAction();
+        if (Intent.ACTION_SEND.equals(action)) {
+            uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+        } else if (Intent.ACTION_VIEW.equals(action)) {
+            uri = intent.getData();
+        }
+        if (uri == null) return;
+
+        InputStream in = null;
+        try {
+            in = getContentResolver().openInputStream(uri);
+            if (in == null) return;
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            int total = 0;
+            while ((n = in.read(buf)) > 0) {
+                total += n;
+                if (total > MAX_SHARE_BYTES) {
+                    toastOnUi("文件超过 8MB，换个小的试试");
+                    return;
+                }
+                bos.write(buf, 0, n);
+            }
+            shareData = bos.toByteArray();
+            shareName = queryDisplayName(uri);
+            shareMime = getContentResolver().getType(uri);
+        } catch (Exception e) {
+            toastOnUi("读取分享的文件失败：" + e.getMessage());
+        } finally {
+            if (in != null) {
+                try { in.close(); } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    private String queryDisplayName(Uri uri) {
+        Cursor c = null;
+        try {
+            c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null);
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) {
+                    String name = c.getString(idx);
+                    if (name != null && name.length() > 0) return name;
+                }
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (c != null) c.close();
+        }
+        String last = uri.getLastPathSegment();
+        return last == null ? "shared.bin" : last;
+    }
+
+    /** launchMode=singleTask：App 已在前台时再次分享，走这里而不是 onCreate */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIncomingIntent(intent);
+        if (web != null) {
+            web.evaluateJavascript(
+                    "(function(){if(window.__paceLabCheckShare)window.__paceLabCheckShare()})()", null);
+        }
+    }
+
+    /**
+     * 网页 accept 里给的是扩展名时转成系统认的 MIME。
+     * 转不出来返回 null，调用方会把类型放开成全部，让用户自己挑 ——
+     * 宁可不过滤，也不能让人选不到文件。
+     */
+    private static String extToMime(String ext) {
+        if (".pdf".equals(ext)) return "application/pdf";
+        if (".docx".equals(ext)) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        if (".doc".equals(ext)) return "application/msword";
+        if (".xlsx".equals(ext)) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        if (".xls".equals(ext)) return "application/vnd.ms-excel";
+        if (".csv".equals(ext)) return "text/csv";
+        if (".txt".equals(ext)) return "text/plain";
+        if (".png".equals(ext)) return "image/png";
+        if (".jpg".equals(ext) || ".jpeg".equals(ext)) return "image/jpeg";
+        if (".webp".equals(ext)) return "image/webp";
+        return null;
     }
 
     @Override
@@ -232,6 +376,24 @@ public class MainActivity extends Activity {
      * WebView 里 <a download> 的 blob 下载是不生效的，不给这条通路，导出功能就是死按钮。
      */
     private class Bridge {
+        /**
+         * 网页来取「分享进来的文件」，返回 name\nmime\nbase64。
+         * 取一次就清空：同一个文件不该被重复导入两遍。
+         */
+        @JavascriptInterface
+        public String takeShared() {
+            String origin = web == null ? "" : web.getUrl();
+            if (origin == null || !origin.startsWith(APP_ORIGIN)) return "";
+            if (shareData == null) return "";
+            String name = shareName == null ? "shared.bin" : shareName;
+            String mime = shareMime == null ? "" : shareMime;
+            String b64 = Base64.encodeToString(shareData, Base64.NO_WRAP);
+            shareData = null;
+            shareName = null;
+            shareMime = null;
+            return name + "\n" + mime + "\n" + b64;
+        }
+
         @JavascriptInterface
         public boolean saveText(String filename, String content) {
             // 只允许自家页面调用，防止将来引入外部页面时被滥用
@@ -273,14 +435,15 @@ public class MainActivity extends Activity {
         public String platform() {
             return "android-" + Build.VERSION.RELEASE;
         }
+    }
 
-        private void toastOnUi(final String msg) {
-            runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
-                }
-            });
-        }
+    /** 提到 Activity 层级：Bridge 和分享接收的异常提示都要用，不能只在内部类里有一份 */
+    private void toastOnUi(final String msg) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+            }
+        });
     }
 }

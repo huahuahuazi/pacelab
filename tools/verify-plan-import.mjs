@@ -254,6 +254,49 @@ const check = (ok, msg, extra) => {
     }
   }
 
+  /* ---------------- 粘贴导入 ---------------- */
+  console.log('\n[粘贴导入]');
+  await ev(`(function(){
+    var s=JSON.parse(localStorage.getItem('pacelab.state.v1'));
+    s.plans=[]; s.activePlanId=null;
+    localStorage.setItem('pacelab.state.v1',JSON.stringify(s)); return 1;
+  })()`);
+  await goto('plan');
+  await ev(`(function(){var b=document.querySelector('[data-act="open:planNew"]');if(b)b.click();return 1})()`);
+  await wait(220);
+  await ev(`(function(){var b=document.querySelector('[data-act="plan:import"]');if(b)b.click();return 1})()`);
+  await wait(220);
+  const pasteEntry = await ev(`(function(){
+    var b=document.querySelector('[data-act="plan:importPaste"]');
+    if(!b) return 'no-paste-button'; b.click();
+    return document.querySelector('#pi-paste') ? 'ok' : 'no-textarea';
+  })()`);
+  check(pasteEntry === 'ok', '导入弹层提供「直接粘贴课表文字」', pasteEntry);
+  await wait(200);
+  // 用 JSON.stringify 传值：样本里有单引号和换行，直接写进模板字符串会被吃掉转义
+  const SAMPLE = JSON.stringify(
+    "周一 轻松跑 8km 6'30/km\n周二 间歇 6×800m 10km\n周三 休息\n周日 长距离 18km"
+  );
+  const parsed = await ev(`(function(){
+    var t=document.querySelector('#pi-paste');
+    if(!t) return 'no-textarea';
+    t.value=${SAMPLE};
+    var b=document.querySelector('[data-act="plan:importPasteParse"]');
+    if(!b) return 'no-parse-button';
+    b.click();
+    return 'clicked';
+  })()`);
+  check(parsed === 'clicked', '有「解析这段文字」按钮', String(parsed).slice(0,160));
+  await wait(500);
+  const pasted = await ev(`(function(){
+    var tr=document.querySelectorAll('#pi-tbody tr');
+    var titles=Array.prototype.slice.call(tr).map(function(r){return r.querySelector('.imp-title').value});
+    return {n:tr.length, titles:titles};
+  })()`);
+  check(pasted && pasted.n === 4, '粘贴的 4 天都被解析出来', pasted ? pasted.n + ' 行' : 'null');
+  check(pasted && pasted.titles.some(function(t){return /间歇/.test(t)}), '粘贴文本里的课型也认得出来',
+    pasted ? pasted.titles.join(' | ') : '');
+
   console.log(`\n${bad ? bad + ' 项失败' : '全部通过'}\n`);
   cdp.close();
   try { chrome.kill(); } catch (e) {}
