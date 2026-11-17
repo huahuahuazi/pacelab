@@ -25,20 +25,22 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- 训练计划导入：允许从微信/QQ/文件管理器「分享」或「用其他应用打开」直接送进来，
-                 不用再在文件管理器里翻。类型只列真正支持的几种，不做 */* 抢全站。 -->
+            <!-- 训练计划导入：允许从微信/QQ/文件管理器「分享」或「用其他应用打开」直接送进来。
+                 微信转发文件时 MIME 经常是 application/octet-stream（不是精确类型），
+                 只声明精确 MIME 会导致微信的「用其他应用打开」列表里根本看不到 PaceLab，
+                 所以这里必须把 octet-stream 和 text/* 一起收进来。 -->
             <intent-filter android:label="导入训练计划">
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="application/pdf" />
                 <data android:mimeType="application/msword" />
+                <data android:mimeType="application/vnd.ms-word" />
                 <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
                 <data android:mimeType="application/vnd.ms-excel" />
                 <data android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
-                <data android:mimeType="text/csv" />
-                <data android:mimeType="text/comma-separated-values" />
-                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/*" />
                 <data android:mimeType="image/*" />
+                <data android:mimeType="application/octet-stream" />
             </intent-filter>
 
             <intent-filter android:label="导入训练计划">
@@ -46,9 +48,13 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" android:mimeType="application/pdf" />
+                <data android:scheme="content" android:mimeType="application/msword" />
                 <data android:scheme="content" android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+                <data android:scheme="content" android:mimeType="application/vnd.ms-excel" />
                 <data android:scheme="content" android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+                <data android:scheme="content" android:mimeType="text/*" />
                 <data android:scheme="content" android:mimeType="image/*" />
+                <data android:scheme="content" android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
     </application>

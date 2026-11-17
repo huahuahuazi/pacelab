@@ -153,6 +153,26 @@ async function readSheet(file) {
   return { rows, text: rows.map((r) => r.join('  ')).join('\n'), source: 'sheet' };
 }
 
+/**
+ * 安卓壳把「分享进来的文件」以 `name\nmime\nbase64` 的形式交给网页。
+ * 这里还原成 File，后续走和文件选择器完全相同的识别链路。
+ * 抽成纯函数是为了能在 node 里测 —— 这条链路没法在 headless 里从微信发起。
+ */
+export function fileFromSharedPayload(raw) {
+  const text = String(raw == null ? '' : raw);
+  const i1 = text.indexOf('\n');
+  const i2 = text.indexOf('\n', i1 + 1);
+  if (i1 < 0 || i2 < 0) return null;
+  const name = text.slice(0, i1) || 'shared.bin';
+  const mime = text.slice(i1 + 1, i2);
+  const b64 = text.slice(i2 + 1);
+  if (!b64) return null;
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new File([arr], name, { type: mime || '' });
+}
+
 /** 按扩展名兜底：安卓文件选择器经常给不出准确的 MIME */
 export async function readPlanFile(file, onProgress) {
   const name = (file.name || '').toLowerCase();

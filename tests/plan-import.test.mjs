@@ -11,19 +11,27 @@ import {
   buildImportedPlan,
   groupPdfItemsByLine,
   entriesFromPreview,
+  fileFromSharedPayload,
 } from '../js/plan-import.js';
 
 let pass = 0;
-const t = (name, fn) => {
-  try {
-    fn();
-    pass++;
-    console.log('  ok  ' + name);
-  } catch (e) {
-    console.log('  FAIL ' + name + '\n       ' + (e && e.message));
-    process.exitCode = 1;
+// 先收集再顺序执行：直接 fn() 的话 async 测试的断言不会被 await，
+// 失败会变成 unhandled rejection 而静默通过 —— 那等于没测。
+const queue = [];
+const t = (name, fn) => queue.push([name, fn]);
+
+async function runAll() {
+  for (const [name, fn] of queue) {
+    try {
+      await fn();
+      pass++;
+      console.log('  ok  ' + name);
+    } catch (e) {
+      console.log('  FAIL ' + name + '\n       ' + (e && e.message));
+      process.exitCode = 1;
+    }
   }
-};
+}
 
 /* ---------------- 正向 ---------------- */
 
@@ -200,4 +208,27 @@ t('逐行预览修改后的条目能重建计划', () => {
   assert.strictEqual(p.totalKm, 8);
 });
 
+/* ---------------- 微信/原生分享进 App 的解码 ---------------- */
+
+t('分享负载能还原成 File，字节原样保留', async () => {
+  const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);  // "%PDF-"
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  const raw = '教练计划.pdf\napplication/pdf\n' + btoa(bin);
+  const f = fileFromSharedPayload(raw);
+  assert.ok(f, '应还原出 File');
+  assert.strictEqual(f.name, '教练计划.pdf', '中文文件名要保住');
+  assert.strictEqual(f.type, 'application/pdf');
+  assert.strictEqual(f.size, 5);
+  const got = new Uint8Array(await f.arrayBuffer());
+  assert.deepStrictEqual(Array.from(got), Array.from(bytes), '内容不能被改动');
+});
+
+t('分享负载格式不对时返回 null，不抛错', () => {
+  for (const bad of ['', 'only-one-line', 'a\nb', null, undefined]) {
+    assert.strictEqual(fileFromSharedPayload(bad), null, JSON.stringify(bad) + ' 应为 null');
+  }
+});
+
+await runAll();
 console.log(`\n${pass} 项通过${process.exitCode ? '，存在失败' : ''}\n`);

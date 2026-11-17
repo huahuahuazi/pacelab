@@ -15,7 +15,7 @@ import { generatePlan, evaluatePlanFit, toDateStr, PHASE_LABEL, retitleDay, reca
 import * as S from './store.js';
 import { lineChart, barChart, weeklyBuckets } from './chart.js';
 import { recognizeRunImage, warmup } from './ocr.js';
-import { readPlanFile, parsePlanRows, buildImportedPlan, entriesFromPreview } from './plan-import.js';
+import { readPlanFile, parsePlanRows, buildImportedPlan, entriesFromPreview, fileFromSharedPayload } from './plan-import.js';
 
 /* ================= 状态 ================= */
 
@@ -946,6 +946,10 @@ function modalPlanImport() {
         <input type="file" id="f-plan-file" accept="image/*,.pdf,.docx,.xlsx,.xls,.csv" class="file-tap" />
       </div>
       <div class="hint">教练发的课表截图、Excel 周计划、Word 训练表、PDF 备赛计划都行。全部在本机识别，不联网、不上传。</div>
+      <div class="hint" style="margin-top:6px;color:var(--text-dim)">
+        <b>微信里的文件不用先保存</b>：点开文件 → 右上角「…」→ 用其他应用打开 → 选 PaceLab；
+        或者长按文件 → 分享 → PaceLab，会直接进到这里。
+      </div>
       <button class="btn ghost mt8" data-act="plan:importPaste" style="width:100%">没有文件？直接粘贴课表文字</button>`;
   }
 
@@ -1050,18 +1054,9 @@ function checkSharedFile() {
   }
   if (!raw) return false;
 
-  const first = raw.indexOf('\n');
-  const second = raw.indexOf('\n', first + 1);
-  if (first < 0 || second < 0) return false;
-  const name = raw.slice(0, first) || 'shared.bin';
-  const mime = raw.slice(first + 1, second);
-  const b64 = raw.slice(second + 1);
-
   try {
-    const bin = atob(b64);
-    const arr = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-    const file = new File([arr], name, { type: mime || '' });
+    const file = fileFromSharedPayload(raw);
+    if (!file) return false;
     startPlanImport(file);
     return true;
   } catch (err) {
