@@ -15,6 +15,7 @@ import { generatePlan, evaluatePlanFit, toDateStr, PHASE_LABEL, retitleDay, reca
 import * as S from './store.js';
 import { lineChart, barChart, weeklyBuckets } from './chart.js';
 import { recognizeRunImage, warmup } from './ocr.js';
+import { readPlanFile, parsePlanRows, buildImportedPlan, entriesFromPreview } from './plan-import.js';
 
 /* ================= 状态 ================= */
 
@@ -56,6 +57,8 @@ const ui = {
   // 避免确认框重绘后丢掉用户刚才选的一堆东西。
   pendingPlan: null,
   planDraft: { ev: '10K', dpw: 4, intensity: 'normal', weeks: 0, startDate: '' },
+  // 训练计划导入：pick → working → preview → 落盘。识别结果只存内存，用户确认才入库
+  planImport: null,
 };
 
 // 支持 index.html#plan 直接打开某个 tab。
@@ -833,6 +836,9 @@ function modalPlanNew() {
       <button class="btn ghost mt8" data-act="plan:custom" style="width:100%">
         或者完全自定义 · 每天自己排
       </button>
+      <button class="btn ghost mt8" data-act="plan:import" style="width:100%">
+        AI 识别训练计划 · 照片 / PDF / Word / Excel
+      </button>
     </div>
   </div>`;
 }
@@ -880,6 +886,133 @@ function modalPlanConfirm() {
         : ''}
     </div>
   </div>`;
+}
+
+/** 训练计划导入弹层：选文件 → 识别中 → 逐行核对 → 确认入库。绝不静默覆盖计划。 */
+function modalPlanImport() {
+  const st = ui.planImport || { stage: 'pick' };
+  const DOW_NAMES = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  const s = (v) => esc(v == null ? '' : String(v));
+  let body = '';
+
+  if (st.stage === 'working') {
+    body = `
+      <div style="padding:26px 0;text-align:center">
+        <div style="font-size:15px;margin-bottom:8px">正在读 ${s(st.fileName)} …</div>
+        <div class="hint" id="pi-progress">${s(st.progress || '加载解析引擎…')}</div>
+      </div>`;
+  } else if (st.stage === 'error') {
+    body = `
+      <p class="sheet-sub">${s(st.fileName)}</p>
+      <div style="background:rgba(226,75,74,0.1);border-left:3px solid var(--danger);border-radius:8px;padding:12px;color:var(--text-dim);font-size:13px;line-height:1.6">
+        ${s(st.message || '识别失败')}
+      </div>
+      <button class="btn ghost mt16" data-act="plan:importRetry" style="width:100%">换一个文件重试</button>`;
+  } else if (st.stage === 'preview') {
+    const low = (st.entries || []).filter((e) => e.lowConfidence).length;
+    const rows = (st.entries || []).map((e, i) => `
+      <tr class="${e.lowConfidence ? 'warn' : ''}">
+        <td><input class="input imp-week" data-i="${i}" type="number" min="1" max="24" value="${(e.week || 0) + 1}" /></td>
+        <td><select class="input imp-dow" data-i="${i}">${DOW_NAMES.map(
+          (n, d) => `<option value="${d}"${d === e.dow ? ' selected' : ''}>${n}</option>`
+        ).join('')}</select></td>
+        <td><input class="input imp-title" data-i="${i}" value="${s(e.title)}" /></td>
+        <td><input class="input imp-dist" data-i="${i}" type="number" step="0.1" min="0" value="${e.distKm || 0}" /></td>
+        <td><input class="input imp-pace" data-i="${i}" value="${s(e.paceText)}" /></td>
+        <td><button class="imp-del" data-act="plan:importDelRow" data-i="${i}" title="删掉这行">×</button></td>
+      </tr>`).join('');
+    body = `
+      <p class="sheet-sub">从 ${s(st.fileName)} 读到 ${st.entries.length} 天${low ? `，其中 ${low} 行没读到距离或配速（已标黄）` : ''}。请逐行核对，多出来的行点 × 删掉。</p>
+      <div style="overflow-x:auto">
+        <table class="import-table">
+          <colgroup><col style="width:38px"><col style="width:66px"><col><col style="width:46px"><col style="width:74px"><col style="width:22px"></colgroup>
+          <thead><tr><th>周</th><th>日</th><th>训练内容</th><th>km</th><th>配速</th><th></th></tr></thead>
+          <tbody id="pi-tbody">${rows}</tbody>
+        </table>
+      </div>
+      <div class="hint">改标题即可改课型（写「间歇」「节奏」「长距离」「休息」都能认）。导入会替换当前训练计划。</div>`;
+  } else {
+    body = `
+      <p class="sheet-sub">拍照或选一个文件，自动读出逐日课表。识别结果会先给你逐行核对，不会直接入库。</p>
+      <div class="drop">
+        <div><strong>选一个训练计划文件</strong></div>
+        <small>照片 / PDF / Word(.docx) / Excel(.xlsx .xls .csv)</small>
+        <input type="file" id="f-plan-file" accept="image/*,.pdf,.docx,.xlsx,.xls,.csv" class="file-tap" />
+      </div>
+      <div class="hint">教练发的课表截图、Excel 周计划、Word 训练表、PDF 备赛计划都行。全部在本机识别，不联网、不上传。</div>`;
+  }
+
+  return `
+  <div class="mask" data-act="modal:bg">
+    <div class="sheet">
+      <div class="sheet-grip"></div>
+      <h3>AI 识别训练计划</h3>
+      ${body}
+      <div class="row-btns mt16">
+        <button class="btn ghost" data-act="modal:close">取消</button>
+        ${st.stage === 'preview' ? '<button class="btn primary" data-act="plan:importConfirm">确认导入</button>' : ''}
+      </div>
+    </div>
+  </div>`;
+}
+
+/** 预览表当前值（含用户手改）。删行和确认导入都走这里，避免改过的东西被覆盖。 */
+function collectImportPreview() {
+  const st = ui.planImport;
+  const rows = [];
+  document.querySelectorAll('#pi-tbody tr').forEach((tr, i) => {
+    const g = (cls) => tr.querySelector('.' + cls);
+    const w = g('imp-week');
+    const d = g('imp-dow');
+    const title = g('imp-title');
+    const km = g('imp-dist');
+    const pace = g('imp-pace');
+    if (!title) return;
+    rows.push({
+      week: Math.max(0, Math.min(23, (Number(w && w.value) || 1) - 1)),
+      dow: Math.max(0, Math.min(6, Number(d && d.value) || 0)),
+      title: title.value,
+      distKm: Number(km && km.value) || 0,
+      paceText: pace ? pace.value : '',
+      desc: st && st.entries[i] ? st.entries[i].desc : '',
+    });
+  });
+  return rows;
+}
+
+/** 文件选择后的完整识别流程。render() 会换掉 input，所以先把 file 存下来再 await。 */
+async function handlePlanFileChange(e) {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  ui.planImport = { stage: 'working', fileName: file.name, progress: '加载解析引擎…' };
+  render();
+
+  const onProgress = (p) => {
+    const box = document.getElementById('pi-progress');
+    if (box) box.textContent = '识别中 ' + Math.round(Math.max(0, Math.min(1, p)) * 100) + '%';
+  };
+
+  try {
+    const res = await readPlanFile(file, onProgress);
+    const parsed = parsePlanRows(res.rows, res.text);
+    if (!parsed.entries.length) {
+      ui.planImport = {
+        stage: 'error', fileName: file.name,
+        message: '没读到像训练课表的内容。换张更清晰的照片，或者直接用 Excel / Word 原文件。',
+      };
+    } else {
+      ui.planImport = {
+        stage: 'preview', fileName: file.name, entries: parsed.entries,
+        startDate: parsed.startDate, source: res.source,
+      };
+    }
+  } catch (err) {
+    ui.planImport = {
+      stage: 'error', fileName: file.name,
+      message: (err && err.message) || '识别失败，请换一个文件',
+    };
+  }
+  render();
 }
 
 /** 生成并落盘。直接生成、确认后生成、采用建议生成都走这一条。 */
@@ -977,6 +1110,7 @@ function modalRender() {
   if (m.type === 'moodInfo') return modalMoodInfo();
   if (m.type === 'dayEdit') return modalDayEdit(m.planId, m.dayId);
   if (m.type === 'planCustom') return modalPlanCustom();
+  if (m.type === 'planImport') return modalPlanImport();
   return '';
 }
 
@@ -1513,6 +1647,58 @@ function handleClick(e) {
       break;
     }
 
+    case 'plan:import': {
+      ui.planImport = { stage: 'pick' };
+      ui.modal = { type: 'planImport' };
+      render();
+      break;
+    }
+
+    case 'plan:importRetry': {
+      ui.planImport = { stage: 'pick' };
+      render();
+      break;
+    }
+
+    case 'plan:importDelRow': {
+      const rows = collectImportPreview();
+      const i = Number(el.dataset.i);
+      if (!Number.isInteger(i) || i < 0 || i >= rows.length) break;
+      rows.splice(i, 1);
+      ui.planImport.entries = rows.map((r) => ({
+        week: r.week, dow: r.dow, title: r.title, distKm: r.distKm,
+        paceText: r.paceText, desc: r.desc, lowConfidence: false,
+      }));
+      render();
+      break;
+    }
+
+    case 'plan:importConfirm': {
+      const st = ui.planImport;
+      if (!st || st.stage !== 'preview') break;
+      const inputs = collectImportPreview();
+      if (!inputs.length) {
+        toast('没有可导入的课表');
+        break;
+      }
+      const plan = buildImportedPlan(entriesFromPreview(inputs), {
+        startDate: st.startDate || undefined,
+        vdot: stats.currentVdot,
+      });
+      state.plans = state.plans.filter((p) => p.id !== state.activePlanId);
+      state.plans.push(plan);
+      state.activePlanId = plan.id;
+      ui.modal = null;
+      ui.planImport = null;
+      ui.planWeeks = 4;
+      commit();
+      ui.tab = 'plan';
+      render();
+      const n = plan.days.filter((d) => d.distKm > 0).length;
+      toast(`已导入 ${plan.weeks} 周 ${n} 天训练 · 共 ${plan.totalKm}km`);
+      break;
+    }
+
     case 'plan:custom-gen': {
       const wBtn = document.querySelector('#cs-weeks button.on');
       const dBtn = document.querySelector('#cs-dpw button.on');
@@ -1944,6 +2130,7 @@ async function handleFileChange(e) {
 document.addEventListener('click', handleClick, true);
 document.addEventListener('change', (e) => {
   if (e.target && e.target.id === 'f-file') handleFileChange(e);
+  if (e.target && e.target.id === 'f-plan-file') handlePlanFileChange(e);
 });
 
 render();

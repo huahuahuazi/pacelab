@@ -1211,3 +1211,40 @@ select.input {
    这两条放最后是为了盖掉前面 .hero .desc 的 margin 简写。 */
 .hero .desc { margin-right: 0; }
 .hero .meter { margin-right: 0; }
+
+/* ---------------- 训练计划导入预览表 ----------------
+   5 列挤在 390px 的弹层里，必须固定列宽 + 小字号，否则输入框会撑破 sheet。 */
+.import-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}
+.import-table th {
+  color: var(--text-faint);
+  font-weight: 500;
+  font-size: 11px;
+  text-align: left;
+  padding: 6px 3px;
+}
+.import-table td { padding: 2px; }
+.import-table .input {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 4px;
+  font-size: 12px;
+}
+.import-table select.input { padding: 6px 2px; }
+.import-table tr.warn { background: rgba(235, 170, 40, 0.09); }
+.import-table .imp-del {
+  width: 20px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.import-table .imp-del:active { color: var(--danger); }

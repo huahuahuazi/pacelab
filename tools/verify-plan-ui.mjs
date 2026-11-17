@@ -260,7 +260,10 @@ const check = (ok, msg, extra) => {
   // 核心变更：用户选 5 练就排 5 练，确认过之后不再被偷偷改成 3 练
   check(result.dpw === 5 && result.req === 5, '按用户选的 5 练生成，不再自动降为 3 练', `${result.dpw} 练 / 用户选 ${result.req}`);
   check(!/已自动降/.test(result.header), '计划页不再出现「已自动降为」', result.header.slice(0, 60));
-  check(!result.aligned || result.start.slice(8) === '16', '起始日对齐到周一', result.start);
+  // 别把日期写死：默认起始日随「今天」变化，唯一该守住的是「必须是周一」
+  const d = new Date(result.start + 'T00:00:00');
+  const dow = (d.getDay() + 6) % 7; // 0 = 周一
+  check(dow === 0, '起始日对齐到周一', result.start);
 
   /* ---- 第二轮：强度档位 + 自选周数，真点按钮走完整链路 ---- */
   console.log('\n[强度档位与自选周数]');
