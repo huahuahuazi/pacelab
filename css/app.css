@@ -1248,3 +1248,46 @@ select.input {
   cursor: pointer;
 }
 .import-table .imp-del:active { color: var(--danger); }
+
+/* ---------------- 训练历史（计划 tab 内的独立视图） ---------------- */
+
+.plan-head-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* 头部按钮不许折行：「返回计划」被挤成两行会顶破 plan-head 的高度 */
+.plan-head .btn.sm,
+.plan-head-actions .btn {
+  white-space: nowrap;
+}
+
+.hist-row {
+  display: flex;
+  gap: 12px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+}
+.hist-row:last-child { border-bottom: 0; }
+
+.hist-date {
+  width: 46px;
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.hist-date small {
+  display: block;
+  margin-top: 2px;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--text-faint);
+}
+
+.hist-body { flex: 1; min-width: 0; }
+.hist-title { font-size: 13.5px; font-weight: 600; }
+.hist-meta { margin-top: 3px; font-size: 11.5px; line-height: 1.5; color: var(--text-faint); }
+.hist-note { margin-top: 4px; font-size: 11.5px; line-height: 1.5; color: var(--text-dim); }

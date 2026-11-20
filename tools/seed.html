@@ -16,19 +16,30 @@ import { generatePlan } from '../js/plan.js';
  * 7'00" 的轻松跑心率约 140，5'40" 的比赛配速心率会到 178。
  * 乱造数据会让体能画像算出「心率效率 100」这种一眼假的结论。
  */
+/**
+ * 日期一律用「N 天前」而不是写死的 2026-11-12 ——
+ * 火柴人和状态气泡只看近 7 天，写死日期过几天就全部失效，
+ * 表现是"首页火柴人不见了"，而代码其实一行没改。这个坑踩过一次。
+ */
+const daysAgo = (n) => {
+  const d = new Date(Date.now() - n * 86400000);
+  const p2 = (v) => (v < 10 ? '0' + v : '' + v);
+  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+};
+
 const state = {
   version: 1,
   profile: { nickname: '跑者', weightKg: 68, age: 32, restingHR: 58, maxHR: null },
   runs: [
-    { id: 'r1', date: '2026-11-12', distanceKm: 6.0, durationSec: 2520, avgHr: 142, cadence: 172, strideCm: 104, note: '轻松跑，状态不错', source: 'manual', createdAt: '2026-11-12T10:00:00Z' },
-    { id: 'r2', date: '2026-11-10', distanceKm: 8.0, durationSec: 3440, avgHr: 140, cadence: 168, strideCm: 106, note: '', source: 'image', createdAt: '2026-11-10T10:00:00Z' },
-    { id: 'r3', date: '2026-11-08', distanceKm: 5.0, durationSec: 1700, avgHr: 178, cadence: 180, strideCm: 116, note: '5K 测试，拼了一把', source: 'manual', createdAt: '2026-11-08T10:00:00Z' },
-    { id: 'r4', date: '2026-11-05', distanceKm: 8.0, durationSec: 2880, avgHr: 168, cadence: 174, strideCm: 111, note: '节奏跑，最后 2km 有点撑', source: 'manual', createdAt: '2026-11-05T10:00:00Z' },
-    { id: 'r5', date: '2026-11-03', distanceKm: 7.0, durationSec: 3010, avgHr: 143, cadence: 167, strideCm: 105, note: '', source: 'manual', createdAt: '2026-11-03T10:00:00Z' },
-    { id: 'r6', date: '2026-10-30', distanceKm: 5.0, durationSec: 2150, avgHr: 141, cadence: 170, strideCm: 102, note: '', source: 'manual', createdAt: '2026-10-30T10:00:00Z' },
-    { id: 'r7', date: '2026-10-27', distanceKm: 9.0, durationSec: 3870, avgHr: 145, cadence: 166, strideCm: 106, note: '', source: 'manual', createdAt: '2026-10-27T10:00:00Z' },
-    { id: 'r8', date: '2026-10-24', distanceKm: 12.0, durationSec: 5280, avgHr: 148, cadence: 165, strideCm: 105, note: '长距离，最后 2km 掉速', source: 'manual', createdAt: '2026-10-24T10:00:00Z' },
-    { id: 'r9', date: '2026-10-21', distanceKm: 6.5, durationSec: 2730, avgHr: 141, cadence: 171, strideCm: 103, note: '', source: 'manual', createdAt: '2026-10-21T10:00:00Z' },
+    { id: 'r1', date: daysAgo(1), distanceKm: 6.0, durationSec: 2520, avgHr: 142, cadence: 172, strideCm: 104, note: '轻松跑，状态不错', source: 'manual', createdAt: '2026-11-12T10:00:00Z' },
+    { id: 'r2', date: daysAgo(3), distanceKm: 8.0, durationSec: 3440, avgHr: 140, cadence: 168, strideCm: 106, note: '', source: 'image', createdAt: '2026-11-10T10:00:00Z' },
+    { id: 'r3', date: daysAgo(5), distanceKm: 5.0, durationSec: 1700, avgHr: 178, cadence: 180, strideCm: 116, note: '5K 测试，拼了一把', source: 'manual', createdAt: '2026-11-08T10:00:00Z' },
+    { id: 'r4', date: daysAgo(8), distanceKm: 8.0, durationSec: 2880, avgHr: 168, cadence: 174, strideCm: 111, note: '节奏跑，最后 2km 有点撑', source: 'manual', createdAt: '2026-11-05T10:00:00Z' },
+    { id: 'r5', date: daysAgo(10), distanceKm: 7.0, durationSec: 3010, avgHr: 143, cadence: 167, strideCm: 105, note: '', source: 'manual', createdAt: '2026-11-03T10:00:00Z' },
+    { id: 'r6', date: daysAgo(14), distanceKm: 5.0, durationSec: 2150, avgHr: 141, cadence: 170, strideCm: 102, note: '', source: 'manual', createdAt: '2026-10-30T10:00:00Z' },
+    { id: 'r7', date: daysAgo(17), distanceKm: 9.0, durationSec: 3870, avgHr: 145, cadence: 166, strideCm: 106, note: '', source: 'manual', createdAt: '2026-10-27T10:00:00Z' },
+    { id: 'r8', date: daysAgo(20), distanceKm: 12.0, durationSec: 5280, avgHr: 148, cadence: 165, strideCm: 105, note: '长距离，最后 2km 掉速', source: 'manual', createdAt: '2026-10-24T10:00:00Z' },
+    { id: 'r9', date: daysAgo(23), distanceKm: 6.5, durationSec: 2730, avgHr: 141, cadence: 171, strideCm: 103, note: '', source: 'manual', createdAt: '2026-10-21T10:00:00Z' },
   ],
   plans: [],
   activePlanId: null,

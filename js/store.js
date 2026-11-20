@@ -20,6 +20,9 @@ const DEFAULT_STATE = {
   runs: [],
   plans: [],
   activePlanId: null,
+  // 已完成的计划任务归档。只追加、不随计划删除而消失 ——
+  // 换计划时旧计划对象会被整个替换掉，打卡记录必须单独留一份。
+  workouts: [],
 };
 
 function clone(o) {
@@ -36,6 +39,7 @@ export function loadState() {
     s.profile = { ...DEFAULT_STATE.profile, ...(parsed.profile || {}) };
     s.runs = Array.isArray(parsed.runs) ? parsed.runs : [];
     s.plans = Array.isArray(parsed.plans) ? parsed.plans : [];
+    s.workouts = Array.isArray(parsed.workouts) ? parsed.workouts : [];
     return s;
   } catch (e) {
     console.error('[store] 读取失败，已重置为初始状态', e);

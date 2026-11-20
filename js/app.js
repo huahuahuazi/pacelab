@@ -16,6 +16,10 @@ import * as S from './store.js';
 import { lineChart, barChart, weeklyBuckets } from './chart.js';
 import { recognizeRunImage, warmup } from './ocr.js';
 import { readPlanFile, parsePlanRows, buildImportedPlan, entriesFromPreview, fileFromSharedPayload } from './plan-import.js';
+import {
+  upsertWorkout, removeWorkout, archivePlanDone, actualFromRun as woActualFromRun,
+  summarizeWorkouts, groupByMonth,
+} from './workouts.js';
 
 /* ================= 状态 ================= */
 
@@ -59,6 +63,8 @@ const ui = {
   planDraft: { ev: '10K', dpw: 4, intensity: 'normal', weeks: 0, startDate: '' },
   // 训练计划导入：pick → working → preview → 落盘。识别结果只存内存，用户确认才入库
   planImport: null,
+  // 计划 tab 内的子视图：current = 当前计划，history = 训练历史
+  planView: 'current',
 };
 
 // 支持 index.html#plan 直接打开某个 tab。
@@ -82,6 +88,41 @@ function commit() {
   if (!ok) toast('写入失败：存储空间可能已满，请先到「我的」导出备份', true);
   recompute();
   return ok;
+}
+
+/* ================= 已完成任务的归档（薄封装，逻辑在 workouts.js） ================= */
+
+function archiveWorkout(plan, day, actual) {
+  if (!Array.isArray(state.workouts)) state.workouts = [];
+  return upsertWorkout(state.workouts, plan, day, actual);
+}
+
+function actualFromRun(run) {
+  return woActualFromRun(run);
+}
+
+function archiveDoneInPlan(planId) {
+  const plan = state.plans.find((p) => p.id === planId);
+  if (!plan) return 0;
+  if (!Array.isArray(state.workouts)) state.workouts = [];
+  return archivePlanDone(state.workouts, plan, state.runs);
+}
+
+/** 老数据只有 day.done、没有归档，启动时补一遍，历史页才不会空 */
+function backfillWorkouts() {
+  if (!Array.isArray(state.workouts)) state.workouts = [];
+  let added = 0;
+  for (const plan of state.plans) {
+    for (const d of plan.days) {
+      if (!d.done) continue;
+      const key = plan.id + ':' + d.id;
+      if (state.workouts.some((w) => w.key === key)) continue;
+      const run = d.runId ? state.runs.find((r) => r.id === d.runId) : null;
+      if (archiveWorkout(plan, d, actualFromRun(run))) added++;
+    }
+  }
+  if (added) commit();
+  return added;
 }
 
 let toastTimer = null;
@@ -475,8 +516,11 @@ function activePlan() {
 }
 
 function viewPlan() {
+  if (ui.planView === 'history') return viewPlanHistory();
+
   const plan = activePlan();
   if (!plan) {
+    const histN = (state.workouts || []).length;
     return `
     <div class="card">
       <div style="font-size:15px;font-weight:700;margin-bottom:6px">生成一份训练计划</div>
@@ -485,6 +529,11 @@ function viewPlan() {
         stats.count
           ? '<button class="btn primary" data-act="open:planNew">选择目标距离</button>'
           : '<button class="btn primary" data-act="open:add">先录一次跑步才能排计划</button>'
+      }
+      ${
+        histN
+          ? `<button class="btn ghost mt8" data-act="plan:history" style="width:100%">查看训练历史 · 已完成 ${histN} 次</button>`
+          : ''
       }
     </div>
     <div class="card flat">
@@ -530,7 +579,10 @@ function viewPlan() {
               : ''
           }</p>
         </div>
-        <button class="btn ghost sm" data-act="plan:del" data-id="${esc(plan.id)}">重排</button>
+        <div class="plan-head-actions">
+          <button class="btn ghost sm" data-act="plan:history">历史 ${(state.workouts || []).length}</button>
+          <button class="btn ghost sm" data-act="plan:del" data-id="${esc(plan.id)}">重排</button>
+        </div>
       </div>
       <div class="progress"><i style="width:${pct.toFixed(1)}%"></i></div>
       <p class="meta" style="margin-top:6px">已完成 ${doneDays} / ${totalDays} 次训练${overdue > 0 ? ` · <span style="color:var(--warn)">${overdue} 次已过期未打卡</span>` : ''}</p>
@@ -546,6 +598,75 @@ function viewPlan() {
         ? `<button class="btn ghost" data-act="plan:more">展开更多（还有 ${plan.weeks - showWeeks} 周）</button>`
         : ''
     }`;
+}
+
+/**
+ * 训练历史：已完成的计划任务独立成页。
+ * 数据只读 state.workouts —— 换计划、重排都不会动它，
+ * 所以这里能看到已经被替换掉的那份计划里完成过的训练。
+ */
+function viewPlanHistory() {
+  const sum = summarizeWorkouts(state.workouts);
+  const groups = groupByMonth(state.workouts);
+
+  const head = `
+    <div class="plan-head">
+      <div class="row">
+        <div>
+          <h2>训练历史</h2>
+          <p class="meta">已完成 ${sum.count} 次${
+            sum.count
+              ? ` · 实际跑量 ${sum.totalKm.toFixed(1)}km${sum.totalSec ? ` · 累计 ${Math.round(sum.totalSec / 60)} 分钟` : ''}${
+                  sum.missing > 0 ? `（${sum.missing} 次没填数据）` : ''
+                }`
+              : ''
+          }</p>
+        </div>
+        <button class="btn ghost sm" data-act="plan:historyBack">返回计划</button>
+      </div>
+    </div>`;
+
+  if (!sum.count) {
+    return (
+      head +
+      `<div class="card">
+        <p class="hint" style="margin:0">还没有完成的训练。在计划里点某一天的「完成」，这里就会留一条记录 —— 换计划、点重排都不会丢。</p>
+      </div>`
+    );
+  }
+
+  const blocks = groups
+    .map((g) => {
+      const label = g.month ? `${g.month.slice(0, 4)} 年 ${Number(g.month.slice(5))} 月` : '未记录日期';
+      return `
+      <div class="week-label"><span>${label}</span><span class="tag">${g.items.length} 次</span></div>
+      <div class="card tight" style="padding:0 16px">${g.items.map(historyRow).join('')}</div>`;
+    })
+    .join('');
+
+  return head + blocks;
+}
+
+function historyRow(w) {
+  const a = w.actual;
+  const dateTxt = w.date ? w.date.slice(5).replace('-', '/') : '--/--';
+  const dowTxt = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'][w.dow] || '';
+  const planTxt = w.distKm ? `${w.distKm}km${w.paceText ? ' @ ' + w.paceText : ''}` : '—';
+  const actTxt =
+    a && a.distKm
+      ? `${a.distKm}km${a.paceSec ? ' @ ' + C.fmtPace(a.paceSec) + '/km' : ''}${
+          a.durationSec ? ' · ' + C.fmtDuration(a.durationSec) : ''
+        }`
+      : '仅标记完成，没填数据';
+  return `
+    <div class="hist-row">
+      <div class="hist-date">${dateTxt}<small>${dowTxt}</small></div>
+      <div class="hist-body">
+        <div class="hist-title">${esc(w.title || '训练')}</div>
+        <div class="hist-meta">计划 ${planTxt} · 实际 ${actTxt}</div>
+        ${a && a.note ? `<div class="hist-note">${esc(a.note)}</div>` : ''}
+      </div>
+    </div>`;
 }
 
 function dayRow(d, plan, todayStr) {
@@ -1071,6 +1192,7 @@ window.__paceLabCheckShare = checkSharedFile;
 /** 生成并落盘。直接生成、确认后生成、采用建议生成都走这一条。 */
 function doGeneratePlan(opts) {
   const plan = generatePlan(opts);
+  archiveDoneInPlan(state.activePlanId);
   state.plans = state.plans.filter((p) => p.id !== state.activePlanId);
   state.plans.push(plan);
   state.activePlanId = plan.id;
@@ -1552,6 +1674,7 @@ function handleClick(e) {
           if (d.runId === id) {
             d.done = false;
             d.runId = null;
+            removeWorkout(state.workouts, p.id, d.id);
           }
         })
       );
@@ -1761,6 +1884,7 @@ function handleClick(e) {
         startDate: st.startDate || undefined,
         vdot: stats.currentVdot,
       });
+      archiveDoneInPlan(state.activePlanId);
       state.plans = state.plans.filter((p) => p.id !== state.activePlanId);
       state.plans.push(plan);
       state.activePlanId = plan.id;
@@ -1785,6 +1909,7 @@ function handleClick(e) {
         vdot: stats.currentVdot,
         startDate: startEl ? startEl.value : undefined,
       });
+      archiveDoneInPlan(state.activePlanId);
       state.plans = state.plans.filter((p) => p.id !== state.activePlanId);
       state.plans.push(plan);
       state.activePlanId = plan.id;
@@ -1802,8 +1927,21 @@ function handleClick(e) {
       render();
       break;
 
+    case 'plan:history': {
+      ui.planView = 'history';
+      render();
+      break;
+    }
+
+    case 'plan:historyBack': {
+      ui.planView = 'current';
+      render();
+      break;
+    }
+
     case 'plan:del': {
-      if (!confirm('重排会删除当前计划和已打卡记录（跑步数据会保留）。继续？')) break;
+      if (!confirm('重排会删除当前计划，已完成的打卡会留在「训练历史」里。继续？')) break;
+      archiveDoneInPlan(state.activePlanId);
       state.plans = state.plans.filter((p) => p.id !== state.activePlanId);
       state.activePlanId = null;
       commit();
@@ -1824,6 +1962,7 @@ function handleClick(e) {
       const day = plan.days.find((d) => d.id === el.dataset.day);
       if (!day) break;
       day.done = true;
+      archiveWorkout(plan, day, null);
       ui.modal = null;
       commit();
       render();
@@ -1839,6 +1978,7 @@ function handleClick(e) {
       if (!confirm('取消这一天的完成标记？')) break;
       day.done = false;
       day.runId = null;
+      removeWorkout(state.workouts, plan.id, day.id);
       commit();
       render();
       break;
@@ -2064,6 +2204,8 @@ function saveRun(planId, dayId) {
       if (day) {
         day.done = true;
         day.runId = run.id;
+        // 完成即归档：换计划时这条不会跟着消失
+        archiveWorkout(plan, day, actualFromRun(run));
       }
     }
   }
@@ -2208,6 +2350,9 @@ document.addEventListener('change', (e) => {
   if (e.target && e.target.id === 'f-file') handleFileChange(e);
   if (e.target && e.target.id === 'f-plan-file') handlePlanFileChange(e);
 });
+
+// 老数据里打卡只在 plan.days 上，先补一遍归档，历史页才不会空
+backfillWorkouts();
 
 render();
 
