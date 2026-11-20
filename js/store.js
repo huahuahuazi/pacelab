@@ -23,6 +23,9 @@ const DEFAULT_STATE = {
   // 已完成的计划任务归档。只追加、不随计划删除而消失 ——
   // 换计划时旧计划对象会被整个替换掉，打卡记录必须单独留一份。
   workouts: [],
+  // 用户亲手删掉的历史 key。归档能从 plan.days[].done 重新推导出来
+  // （启动补档、换计划归档各一次），不记住"这条是用户删的"就会又变回来。
+  workoutsDeleted: [],
 };
 
 function clone(o) {
@@ -40,6 +43,7 @@ export function loadState() {
     s.runs = Array.isArray(parsed.runs) ? parsed.runs : [];
     s.plans = Array.isArray(parsed.plans) ? parsed.plans : [];
     s.workouts = Array.isArray(parsed.workouts) ? parsed.workouts : [];
+    s.workoutsDeleted = Array.isArray(parsed.workoutsDeleted) ? parsed.workoutsDeleted : [];
     return s;
   } catch (e) {
     console.error('[store] 读取失败，已重置为初始状态', e);

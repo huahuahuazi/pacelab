@@ -17,8 +17,9 @@ import { lineChart, barChart, weeklyBuckets } from './chart.js';
 import { recognizeRunImage, warmup } from './ocr.js';
 import { readPlanFile, parsePlanRows, buildImportedPlan, entriesFromPreview, fileFromSharedPayload } from './plan-import.js';
 import {
-  upsertWorkout, removeWorkout, archivePlanDone, actualFromRun as woActualFromRun,
+  upsertWorkout, removeWorkout, removeWorkoutByKey, archivePlanDone, actualFromRun as woActualFromRun,
   summarizeWorkouts, groupByMonth,
+  markWorkoutDeleted, unmarkWorkoutDeleted, pruneTombstones,
 } from './workouts.js';
 
 /* ================= 状态 ================= */
@@ -65,6 +66,9 @@ const ui = {
   planImport: null,
   // 计划 tab 内的子视图：current = 当前计划，history = 训练历史
   planView: 'current',
+  // 上一次成功删除历史的时间戳。列表删完会上移，同一像素点落到下一行，
+  // 没有这个冷却窗，手抖连点一下就是两条。
+  lastHistDelAt: 0,
 };
 
 // 支持 index.html#plan 直接打开某个 tab。
@@ -101,27 +105,41 @@ function actualFromRun(run) {
   return woActualFromRun(run);
 }
 
+/**
+ * 墓碑表：用户亲手删掉的历史 key。
+ * 合并逻辑统一收在这里 —— 老版本数据没有这个字段，读出来是数组才安全。
+ */
+function tombstones() {
+  if (!Array.isArray(state.workoutsDeleted)) state.workoutsDeleted = [];
+  return state.workoutsDeleted;
+}
+
 function archiveDoneInPlan(planId) {
   const plan = state.plans.find((p) => p.id === planId);
   if (!plan) return 0;
   if (!Array.isArray(state.workouts)) state.workouts = [];
-  return archivePlanDone(state.workouts, plan, state.runs);
+  return archivePlanDone(state.workouts, plan, state.runs, tombstones());
 }
 
-/** 老数据只有 day.done、没有归档，启动时补一遍，历史页才不会空 */
+/**
+ * 老数据只有 day.done、没有归档，启动时补一遍，历史页才不会空。
+ * 这里走 archivePlanDone 而不是自己再写一遍循环：墓碑的判据只能有一份，
+ * 两份实现早晚会在某次改动里错过一边，结果就是删掉的历史悄悄复活。
+ */
 function backfillWorkouts() {
   if (!Array.isArray(state.workouts)) state.workouts = [];
   let added = 0;
   for (const plan of state.plans) {
-    for (const d of plan.days) {
-      if (!d.done) continue;
-      const key = plan.id + ':' + d.id;
-      if (state.workouts.some((w) => w.key === key)) continue;
-      const run = d.runId ? state.runs.find((r) => r.id === d.runId) : null;
-      if (archiveWorkout(plan, d, actualFromRun(run))) added++;
-    }
+    added += archivePlanDone(state.workouts, plan, state.runs, tombstones());
   }
-  if (added) commit();
+  // 判据是「planId 不在 state.plans 里」。被清掉的 key 必然推不出来，
+  // 所以这里的顺序其实是多余的保险 —— 但别动它：一旦判据放宽成
+  // 「archive 里没有了就清」，顺序反了就会在同一次启动里复活。
+  const before = tombstones();
+  const kept = pruneTombstones(before, state.plans.map((p) => p.id));
+  const pruned = kept.length !== before.length;
+  if (pruned) state.workoutsDeleted = kept;
+  if (added || pruned) commit();
   return added;
 }
 
@@ -624,6 +642,11 @@ function viewPlanHistory() {
         </div>
         <button class="btn ghost sm" data-act="plan:historyBack">返回计划</button>
       </div>
+      ${
+        sum.count
+          ? `<p class="hint" style="margin:8px 0 0">删掉的只是这里的一条记录；计划里的完成标记要取消，请回计划页点那天的「已完成」。</p>`
+          : ''
+      }
     </div>`;
 
   if (!sum.count) {
@@ -666,6 +689,7 @@ function historyRow(w) {
         <div class="hist-meta">计划 ${planTxt} · 实际 ${actTxt}</div>
         ${a && a.note ? `<div class="hist-note">${esc(a.note)}</div>` : ''}
       </div>
+      <button class="hist-del" data-act="hist:del" data-key="${esc(w.key)}" title="删除这条历史" aria-label="删除这条历史">✕</button>
     </div>`;
 }
 
@@ -1933,6 +1957,39 @@ function handleClick(e) {
       break;
     }
 
+    // 只删归档，绝不动 state.runs —— 跑步记录撑着 VDOT / 体能画像 / 记录页，
+    // 用户想清掉一条过期打卡，不该顺带把训练数据一起毁掉。
+    case 'hist:del': {
+      // 删完列表会整体上移，同一像素点就落到下一行的按钮上。
+      // 手指刚抬起再蹭一下就会连着删掉第二条，所以留一个冷却窗。
+      if (Date.now() - (ui.lastHistDelAt || 0) < 600) break;
+      const key = el.dataset.key;
+      if (!key) break;
+      if (!confirm('只删除这条历史。跑步记录和计划页的「已完成 ✓」都会保留。继续？')) break;
+      const beforeWorkouts = state.workouts.slice();
+      const beforeTombstones = tombstones().slice();
+      if (!removeWorkoutByKey(state.workouts, key)) {
+        // 连点两下或记录已在别处删掉：给个交代，但不能报错
+        toast('这条历史已经不在了');
+        break;
+      }
+      // 光删数组不够：计划里那天可能还是 done，启动补档会把它重新推导出来。
+      // 墓碑才是"用户亲手删过"这件事的唯一凭据。
+      markWorkoutDeleted(tombstones(), key);
+      // 写盘失败要把内存改回去：否则页面显示删了、存储里还在，
+      // 刷新后又冒出来，而且此时再点删除只会提示"不在了"——三处状态全对不上。
+      if (!commit()) {
+        state.workouts = beforeWorkouts;
+        state.workoutsDeleted = beforeTombstones;
+        toast('删除失败：本地存储写入出错，请先到「我的」导出备份再试', true);
+        break;
+      }
+      ui.lastHistDelAt = Date.now();
+      render();
+      toast('已删除这条历史，跑步记录还在「记录」页');
+      break;
+    }
+
     case 'plan:historyBack': {
       ui.planView = 'current';
       render();
@@ -1962,6 +2019,8 @@ function handleClick(e) {
       const day = plan.days.find((d) => d.id === el.dataset.day);
       if (!day) break;
       day.done = true;
+      // 重新打卡要把墓碑摘掉，否则这天之前被删过就再也补不回来
+      unmarkWorkoutDeleted(tombstones(), plan.id + ':' + day.id);
       archiveWorkout(plan, day, null);
       ui.modal = null;
       commit();
@@ -2204,6 +2263,8 @@ function saveRun(planId, dayId) {
       if (day) {
         day.done = true;
         day.runId = run.id;
+        // 重新打卡要把墓碑摘掉，否则这天之前被删过就再也补不回来
+        unmarkWorkoutDeleted(tombstones(), plan.id + ':' + day.id);
         // 完成即归档：换计划时这条不会跟着消失
         archiveWorkout(plan, day, actualFromRun(run));
       }

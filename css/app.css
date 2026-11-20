@@ -1291,3 +1291,38 @@ select.input {
 .hist-title { font-size: 13.5px; font-weight: 600; }
 .hist-meta { margin-top: 3px; font-size: 11.5px; line-height: 1.5; color: var(--text-faint); }
 .hist-note { margin-top: 4px; font-size: 11.5px; line-height: 1.5; color: var(--text-dim); }
+
+/* 删除入口刻意做小、做灰：一条训练的标题才是这行的主角，
+   删除只是「想起来要清的时候找得到」的东西。悬停/按下才给危险色。 */
+.hist-del {
+  position: relative;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  margin-top: -3px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 26px;
+  text-align: center;
+  cursor: pointer;
+}
+/* 视觉只有 26px，手指按不准。用透明伪元素把热区外扩到 44×44（26 + 9×2）。
+   不写 inset 简写：那是 Chrome 87 才有的属性，旧 WebView 会整条忽略，
+   热区等于没做，还不报错。 */
+.hist-del::after {
+  content: '';
+  position: absolute;
+  top: -9px;
+  right: -9px;
+  bottom: -9px;
+  left: -9px;
+}
+.hist-del:hover,
+.hist-del:active {
+  color: var(--danger);
+  background: var(--surface-2);
+}
