@@ -9,7 +9,7 @@
  * 改了业务代码记得把 VERSION 往上加一位，否则用户会一直拿旧缓存。
  */
 
-const VERSION = 'pacelab-v1.0.0';
+const VERSION = 'pacelab-v1.11.0';
 const CORE = [
   './',
   './index.html',
@@ -21,6 +21,9 @@ const CORE = [
   './js/store.js',
   './js/chart.js',
   './js/ocr.js',
+  './js/workouts.js',
+  './js/plan-import.js',
+  './js/records.js',
   './assets/icon.svg',
   './assets/icon-192.png',
   './assets/icon-512.png',

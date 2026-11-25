@@ -1326,3 +1326,61 @@ select.input {
   color: var(--danger);
   background: var(--surface-2);
 }
+
+/* 编辑入口：和删除并排、同样克制。
+   编辑不是危险动作，所以悬停给主色而不是危险色。 */
+.hist-edit {
+  position: relative;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  margin-top: -3px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 26px;
+  text-align: center;
+  cursor: pointer;
+}
+.hist-edit:hover,
+.hist-edit:active {
+  color: var(--primary);
+  background: var(--surface-2);
+}
+
+/* 两个按钮并排时热区会互相压：各 26px 视觉尺寸，热区若四周都外扩 9px（44×44），
+   紧贴排布就有 18px 的重叠区 —— 点在「编辑」右半边会落到「删除」上，
+   那是会删数据的误触。所以横向改成「只朝外扩」：
+   编辑只往左伸、删除只往右伸，中间那段 12px 的间隙谁都不碰（逐列扫描实测 12/12 列落空）。
+   纵向仍外扩 9px（手指按高度最容易偏，那个方向没有歧义）：
+   可点区域 29×44，行高 102、行内边距 11，不会串到相邻行。 */
+.hist-acts {
+  display: flex;
+  gap: 12px;
+  flex-shrink: 0;
+  margin-top: -3px;
+}
+.hist-acts .hist-edit,
+.hist-acts .hist-del { margin-top: 0; }
+.hist-acts .hist-edit::after,
+.hist-acts .hist-del::after {
+  content: '';
+  position: absolute;
+  top: -9px;
+  bottom: -9px;
+}
+.hist-acts .hist-edit::after { left: -3px; right: 0; }
+.hist-acts .hist-del::after { left: 0; right: -3px; }
+
+/* 记录页的日期筛选条：输入框吃掉剩余宽度，「清除」不换行 */
+.rec-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+.rec-filter .input { flex: 1; min-width: 0; }
+.rec-filter .btn { flex-shrink: 0; white-space: nowrap; }

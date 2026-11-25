@@ -21,6 +21,10 @@ import {
   summarizeWorkouts, groupByMonth,
   markWorkoutDeleted, unmarkWorkoutDeleted, pruneTombstones,
 } from './workouts.js';
+import {
+  RECENT_LIMIT, sortRunsDesc, pickVisibleRuns, foldedCount, normalizeDateStr, validateActualEdit,
+  dateLabelParts,
+} from './records.js';
 
 /* ================= 状态 ================= */
 
@@ -66,6 +70,14 @@ const ui = {
   planImport: null,
   // 计划 tab 内的子视图：current = 当前计划，history = 训练历史
   planView: 'current',
+  // 记录页：折叠状态和日期筛选都是纯 UI 状态，不进 localStorage。
+  // 重开 App 回到「最近 5 条」是刻意的 —— 折叠的意义就是让首屏短一点。
+  recordsExpanded: false,
+  recordsDate: '',
+  // 导入预览：解析好的 state 先放这里，用户点「确认覆盖」才真正换上去
+  importPreview: null,
+  // 导出兜底弹层要展示的备份文本（原生写入失败时才用）
+  exportFallback: null,
   // 上一次成功删除历史的时间戳。列表删完会上移，同一像素点落到下一行，
   // 没有这个冷却窗，手抖连点一下就是两条。
   lastHistDelAt: 0,
@@ -446,7 +458,7 @@ function recentCard() {
 }
 
 function recRow(r) {
-  const d = new Date(r.date);
+  const parts = dateLabelParts(r.date);
   const ev = C.evaluateRun(r);
   // 心率/步频/步幅都是选填，有什么显示什么，没有就不占位
   const extras = [];
@@ -455,7 +467,7 @@ function recRow(r) {
   if (r.strideCm) extras.push(`步幅 ${r.strideCm}cm`);
 
   return `<div class="rec">
-    <div class="date"><b>${d.getDate()}</b><span>${d.getMonth() + 1}月</span></div>
+    <div class="date"><b>${parts.day}</b><span>${parts.month}</span></div>
     <div class="main">
       <div class="top"><span class="km">${Number(r.distanceKm).toFixed(2)}</span><span class="unit">km</span>
         ${r.source === 'image' ? '<span class="badge-src">图片</span>' : ''}</div>
@@ -504,12 +516,52 @@ function viewHome() {
 
 /* ================= 视图：记录 ================= */
 
+/** 日期筛选条下方那句「只看 2026-11-12 的记录 · 3 条」，把选择状态和命中数一起说出来 */
+function recordsFilterHint(dateStr, matched) {
+  const p = normalizeDateStr(dateStr).split('-');
+  const label = p.length === 3 ? `${Number(p[0])} 年 ${Number(p[1])} 月 ${Number(p[2])} 日` : dateStr;
+  return `只看 ${label} 的记录 · ${Math.max(0, Number(matched) || 0)} 条`;
+}
+
 function viewRecords() {
-  const runs = [...state.runs].sort((a, b) => new Date(b.date) - new Date(a.date));
-  if (!runs.length) {
+  // 趋势图用 stats（全部记录），列表用自己的排序 —— 两者数据源同一个 state.runs，
+  // 只是排序副本独立，避免为了展示顺序去动全局状态。
+  const all = sortRunsDesc(state.runs);
+  if (!all.length) {
     return `<div class="empty"><div class="ico">📋</div><p>还没有跑步记录</p><small>手填或用截图录入都可以</small></div>
       <button class="btn primary mt12" data-act="open:add">录入一次跑步</button>`;
   }
+
+  const expanded = !!ui.recordsExpanded;
+  // 日期筛选只在展开状态下出现，所以折叠时一律不传 dateStr，避免「收起后列表莫名其妙少了」
+  const dateStr = expanded ? normalizeDateStr(ui.recordsDate) : '';
+  const visible = pickVisibleRuns(all, {
+    expanded: !!expanded,
+    dateStr: dateStr,
+    limit: RECENT_LIMIT,
+  });
+  const hidden = expanded ? 0 : foldedCount(all.length, RECENT_LIMIT);
+
+  const filterBar = expanded
+    ? `<div class="rec-filter">
+        <input class="input" id="r-date" type="date" value="${esc(dateStr)}" aria-label="按日期筛选记录" />
+        <button class="btn ghost sm" data-act="records:dateClear">清除</button>
+      </div>
+      ${dateStr ? `<p class="hint" style="margin:0 4px 8px">${esc(recordsFilterHint(dateStr, visible.length))}</p>` : ''}`
+    : '';
+
+  // 筛选后为空不能渲染一张空卡片：那看起来像加载失败
+  const list = visible.length
+    ? `<div class="card tight" style="padding:0 16px">${visible.map(recRow).join('')}</div>`
+    : `<div class="empty"><div class="ico">🗓</div><p>这天没有记录</p><small>换个日期看看，或者点下方「清除」看全部</small></div>`;
+
+  // 折叠按钮：还有藏起来的才出现；展开后变成「收起」
+  const foldBtn = expanded
+    ? `<button class="btn ghost sm mt12" style="width:100%" data-act="records:fold">收起</button>`
+    : hidden > 0
+      ? `<button class="btn ghost sm mt12" style="width:100%" data-act="records:fold">展开全部（还有 ${hidden} 条）</button>`
+      : '';
+
   return `
     <div class="card flat">
       <div class="stat-grid">
@@ -522,8 +574,10 @@ function viewRecords() {
     <div class="card flat">${lineChart({ points: stats.trend, h: 148, fmt: (v) => v.toFixed(0) })}</div>
     <div class="section-title"><span>配速趋势（越上越快）</span></div>
     <div class="card flat">${lineChart({ points: stats.paceTrend, h: 148, invertY: true, fmt: (v) => C.fmtPace(v), color: 'var(--accent)' })}</div>
-    <div class="section-title"><span>全部记录 ${runs.length} 条</span></div>
-    <div class="card tight" style="padding:0 16px">${runs.map(recRow).join('')}</div>
+    <div class="section-title"><span>全部记录 ${all.length} 条</span></div>
+    ${filterBar}
+    ${list}
+    ${foldBtn}
     <button class="btn ghost sm mt12" style="width:100%" data-act="open:add">+ 录入新记录</button>`;
 }
 
@@ -689,7 +743,10 @@ function historyRow(w) {
         <div class="hist-meta">计划 ${planTxt} · 实际 ${actTxt}</div>
         ${a && a.note ? `<div class="hist-note">${esc(a.note)}</div>` : ''}
       </div>
-      <button class="hist-del" data-act="hist:del" data-key="${esc(w.key)}" title="删除这条历史" aria-label="删除这条历史">✕</button>
+      <div class="hist-acts">
+        <button class="hist-edit" data-act="hist:edit" data-key="${esc(w.key)}" title="编辑这条历史" aria-label="编辑这条历史">✎</button>
+        <button class="hist-del" data-act="hist:del" data-key="${esc(w.key)}" title="删除这条历史" aria-label="删除这条历史">✕</button>
+      </div>
     </div>`;
 }
 
@@ -1298,6 +1355,121 @@ function modalDone(planId, dayId) {
   </div>`;
 }
 
+/**
+ * 编辑一条训练历史的「实际完成数据」。
+ *
+ * 只改实际值（标题 / 距离 / 用时 / 备注），绝不碰 plan.days 里的计划值 ——
+ * 「计划 8km、实际跑了 6km」这个差距本身就是训练信息，抹掉就没意义了。
+ *
+ * 有 actual.runId 时必须同步 state.runs 里那条：记录页、VDOT、体能画像
+ * 全是从 runs 算出来的，只改归档会让历史页和记录页当场打架。
+ */
+function modalHistEdit(key) {
+  const w = (state.workouts || []).find((x) => x && x.key === key);
+  if (!w) return '';
+  const a = w.actual || {};
+  const dateTxt = w.date ? w.date.slice(5).replace('-', '/') : '--/--';
+  const dowTxt = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'][w.dow] || '';
+  const planTxt = w.distKm ? `${w.distKm}km${w.paceText ? ' @ ' + w.paceText : ''}` : '—';
+  const linked = !!(a && a.runId);
+
+  return `
+  <div class="mask" data-act="modal:bg">
+    <div class="sheet">
+      <div class="sheet-grip"></div>
+      <h3>编辑训练记录</h3>
+      <p class="sheet-sub">${dateTxt} ${dowTxt} · 计划 ${esc(planTxt)}（计划值不会被改动）</p>
+      ${
+        linked
+          ? ''
+          : '<p class="hint" style="margin:0 0 10px">这条历史没有关联的跑步记录：补录的数字只记在「训练历史」，不会出现在记录页和体能画像里。想让这次跑量进统计，去「记录」页补一条（会和这条历史各算一次，别重复录）。</p>'
+      }
+
+      <div class="field">
+        <label>训练标题</label>
+        <input class="input" id="he-title" type="text" maxlength="40" value="${esc(w.title || '')}" placeholder="轻松跑 8km" />
+      </div>
+
+      <div class="field">
+        <label>实际距离 <span class="opt">km</span></label>
+        <input class="input" id="he-dist" type="text" inputmode="decimal" value="${a.distKm ? a.distKm : ''}" placeholder="8.2" />
+      </div>
+
+      ${durFieldHtml(a.durationSec || 0, '保存后按「距离 ÷ 用时」重算配速')}
+
+      <div class="field">
+        <label>备注 <span class="opt">选填</span></label>
+        <textarea class="input" id="he-note" rows="3" maxlength="200" placeholder="体感、配速、有没有掉速">${esc(a.note || '')}</textarea>
+      </div>
+
+      <div class="row-btns">
+        <button class="btn ghost" data-act="modal:close">取消</button>
+        <button class="btn primary" data-act="hist:editSave" data-key="${esc(key)}">保存</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/**
+ * 导入前预览。
+ *
+ * 这层不是装饰 —— 它是「选错文件」唯一的防线。以前选完文件直接覆盖，
+ * 用户拿一份三天前的备份一导入，当前几十条记录当场没了，中间没有任何一步能拦住。
+ */
+function modalImportPreview() {
+  const p = ui.importPreview;
+  if (!p || !p.summary) return '';
+  const s = p.summary;
+  const curRuns = (state.runs || []).length;
+  const curPlans = (state.plans || []).length;
+  const curWorkouts = (state.workouts || []).length;
+
+  return `
+  <div class="mask" data-act="modal:bg">
+    <div class="sheet">
+      <div class="sheet-grip"></div>
+      <h3>确认导入这份备份？</h3>
+      <p class="sheet-sub">先看一眼里面有什么，点「确认覆盖」才会替换当前数据。</p>
+
+      <div class="kv-grid">
+        <div><label>跑步记录</label><b>${s.runs} 条</b></div>
+        <div><label>训练计划</label><b>${s.plans} 份</b></div>
+        <div><label>训练历史</label><b>${s.workouts} 条</b></div>
+        <div><label>导出时间</label><b>${esc(s.exportedAtText)}</b></div>
+      </div>
+
+      <div style="background:rgba(255,255,255,0.04);border-left:3px solid var(--warn);border-radius:8px;padding:12px;color:var(--text-dim);font-size:13px;line-height:1.65">
+        导入会覆盖当前的
+        <b style="color:var(--text)">${curRuns} 条记录、${curPlans} 份计划、${curWorkouts} 条训练历史</b>。
+        覆盖后无法撤销 —— 当前数据还没备份的话，先取消并导出一份。
+      </div>
+
+      <div class="row-btns mt16">
+        <button class="btn ghost" data-act="import:cancel">取消</button>
+        <button class="btn primary" data-act="import:confirm">确认覆盖</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function modalExportFallback() {
+  const p = ui.exportFallback;
+  if (!p) return '';
+  return `
+  <div class="mask" data-act="modal:bg">
+    <div class="sheet">
+      <div class="sheet-grip"></div>
+      <h3>手动保存这份备份</h3>
+      <p class="sheet-sub">文件没能存到手机（${esc(p.filename)}）。直接把下面内容复制出来，粘到备忘录或发给自己，同样可以导入。</p>
+      <textarea class="input" id="export-text" readonly rows="8" style="font-family:var(--font-num);font-size:11px;line-height:1.5">${esc(p.json)}</textarea>
+      <div class="row-btns mt12">
+        <button class="btn ghost" data-act="modal:close">关闭</button>
+        <button class="btn primary" data-act="export:copy">复制</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 function modalRender() {
   const m = ui.modal;
   if (!m) return '';
@@ -1310,6 +1482,9 @@ function modalRender() {
   if (m.type === 'dayEdit') return modalDayEdit(m.planId, m.dayId);
   if (m.type === 'planCustom') return modalPlanCustom();
   if (m.type === 'planImport') return modalPlanImport();
+  if (m.type === 'histEdit') return modalHistEdit(m.key);
+  if (m.type === 'importPreview') return modalImportPreview();
+  if (m.type === 'exportFallback') return modalExportFallback();
   return '';
 }
 
@@ -1579,6 +1754,10 @@ function closeModal() {
   ui.ocr = null;
   // 统一收口：点遮罩、点取消都走这里，待确认的参数不能留在内存里
   ui.pendingPlan = null;
+  // 导入预览里的 state 是一整份数据副本，留在内存里纯属占地方，也容易被下一次误用
+  ui.importPreview = null;
+  // 兜底弹层里那份 JSON 同理
+  ui.exportFallback = null;
   render();
 }
 
@@ -1642,6 +1821,18 @@ function handleClick(e) {
 
     case 'open:add':
       openAdd(null);
+      break;
+
+    // ---- 记录页：折叠 / 日期筛选 ----
+    case 'records:fold':
+      ui.recordsExpanded = !ui.recordsExpanded;
+      render();
+      break;
+
+    // 只清筛选条件，不动折叠状态：用户点「清除」是想看全部，不是想收起
+    case 'records:dateClear':
+      ui.recordsDate = '';
+      render();
       break;
 
     case 'modal:close':
@@ -1990,6 +2181,20 @@ function handleClick(e) {
       break;
     }
 
+    // 编辑的是「实际完成数据」，计划值一律不动
+    case 'hist:edit': {
+      const key = el.dataset.key;
+      if (!key) break;
+      ui.modal = { type: 'histEdit', key: key };
+      render();
+      break;
+    }
+
+    case 'hist:editSave': {
+      saveHistoryEdit(el.dataset.key);
+      break;
+    }
+
     case 'plan:historyBack': {
       ui.planView = 'current';
       render();
@@ -2082,56 +2287,191 @@ function handleClick(e) {
     }
 
     case 'data:export': {
-      const json = S.exportData(state);
       const filename = `pacelab-backup-${toDateStr(new Date())}.json`;
-
-      // 安卓壳里 <a download> 的 blob 下载完全不生效，必须交给原生写到「下载」目录，
-      // 否则这个按钮在 App 里就是个死按钮。网页版走下面原来的 blob 路径。
-      if (window.AndroidBridge && typeof window.AndroidBridge.saveText === 'function') {
-        if (window.AndroidBridge.saveText(filename, json)) break;
+      let json = '';
+      try {
+        json = S.exportData(state);
+      } catch (err) {
+        console.error('[export] 序列化失败', err);
+        toast('导出失败，请重试', true);
+        break;
       }
 
-      const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 2000);
-      toast('备份已导出');
+      // 安卓壳里 <a download> 的 blob 下载完全不生效，必须交给原生写到「下载」目录。
+      // 但原生成功之后这里仍然要自己 toast 一次 —— 系统通知很容易被划掉，
+      // 用户按完按钮什么都没看到，就会判定"按了没反应"（这正是本次反馈的来源）。
+      const bridge = window.AndroidBridge;
+      if (bridge && typeof bridge.saveText === 'function') {
+        let ok = false;
+        try {
+          ok = bridge.saveText(filename, json);
+        } catch (err) {
+          console.error('[export] 原生保存抛错', err);
+          ok = false;
+        }
+        // 有的壳把 boolean 写成字符串，两种都当成功
+        if (ok === true || String(ok) === 'true') {
+          toast('已导出 ' + filename + '，去「下载」文件夹看看');
+        } else {
+          // 不能回落到 blob（WebView 里那条路本来就不生效，静默"成功"更糟），
+          // 但也不能什么都不给 —— 某些机型的原生写入坏了就彻底没法备份了。
+          console.error('[export] 原生保存失败，改让用户手动复制');
+          openExportFallbackModal(filename, json);
+        }
+        break;
+      }
+
+      try {
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+        toast('已导出，去下载文件夹看看');
+      } catch (err) {
+        console.error('[export] 下载失败', err);
+        openExportFallbackModal(filename, json);
+      }
+      break;
+    }
+
+    // 兜底弹层里的「复制」：先用 execCommand（老内核也支持），
+    // 失败就告诉用户手动长按 —— 不能报了"已复制"其实什么都没进剪贴板
+    case 'export:copy': {
+      selectExportText();
+      let ok = false;
+      try {
+        ok = document.execCommand && document.execCommand('copy');
+      } catch (err) {
+        ok = false;
+      }
+      if (ok) {
+        toast('已复制，粘到备忘录或聊天窗口里保存');
+      } else {
+        toast('这个内核不允许自动复制，请长按下面文本选择「复制」', true);
+      }
       break;
     }
 
     case 'data:import': {
+      // 先清掉上一次可能残留的选择器（见下面的 cancel 说明）。
+      // 用 for 循环而不是 NodeList.forEach：个别老内核没有 NodeList.forEach。
+      const stale = document.querySelectorAll('input[type="file"][data-import]');
+      for (let i = 0; i < stale.length; i++) {
+        try {
+          stale[i].remove();
+        } catch (err) {
+          /* 忽略 */
+        }
+      }
+
       const input = document.createElement('input');
       input.type = 'file';
       input.accept = '.json,application/json';
+      // 打标记，便于下一次导入时定位并清掉残留元素
+      input.setAttribute('data-import', '1');
       // 必须挂进文档：WebView 里游离的 input 点不动，文件选择器根本不弹
       input.style.display = 'none';
       document.body.appendChild(input);
+
+      // 这个 input 必须在每条路径上消失，否则会一个个攒在 DOM 里，
+      // 而某些 WebView 会复用旧元素，表现出来就是"第二次导入点了没反应"。
+      // 三条路径分别是：选到文件（onchange → cleanup）、读取失败（onerror → cleanup）、
+      // 在系统选择器里点「取消」（没有任何事件，只能靠 cancel 事件 + 下一次点击前的清扫）。
+      let closed = false;
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          input.remove();
+        } catch (err) {
+          /* 个别内核没有 remove，忽略 */
+        }
+      };
+
+      // Chrome 113+ 才有 cancel 事件；老内核这一行是空操作，
+      // 那种情况下就靠上面「新建前清扫」兜底。
+      try {
+        input.addEventListener('cancel', cleanup);
+      } catch (err) {
+        /* 忽略 */
+      }
+
       input.onchange = () => {
         const f = input.files && input.files[0];
         if (!f) {
-          input.remove();
+          cleanup();
           return;
         }
         const reader = new FileReader();
         reader.onload = () => {
-          input.remove();
-          const r = S.importData(String(reader.result || ''));
+          cleanup();
+          const r = S.describeImport(String(reader.result || ''));
           if (!r.ok) {
-            toast(r.error);
+            toast(r.error, true);
             return;
           }
-          if (!confirm('导入会覆盖当前所有数据，确定继续？')) return;
-          state = r.state;
-          commit();
+          // 解析结果先放内存，覆盖要等用户在预览层点「确认覆盖」
+          ui.importPreview = { summary: r.summary, next: r.state };
+          ui.modal = { type: 'importPreview' };
           render();
-          toast('导入成功');
         };
-        reader.readAsText(f);
+        reader.onerror = () => {
+          cleanup();
+          console.error('[import] 读取文件失败', reader.error);
+          toast('读取文件失败，换个文件再试一次', true);
+        };
+        try {
+          reader.readAsText(f);
+        } catch (err) {
+          cleanup();
+          toast('读取文件失败，换个文件再试一次', true);
+        }
       };
+
       input.click();
+      break;
+    }
+
+    case 'import:cancel': {
+      ui.importPreview = null;
+      ui.modal = null;
+      render();
+      toast('已取消，数据没有变化');
+      break;
+    }
+
+    case 'import:confirm': {
+      const p = ui.importPreview;
+      if (!p || !p.next) {
+        ui.modal = null;
+        render();
+        toast('没有可导入的备份，请重新选择文件', true);
+        break;
+      }
+      const before = state;
+      const next = p.next;
+      state = next;
+      if (!commit()) {
+        // 写盘失败就别留在内存里：否则页面显示新数据、存储里还是旧的，
+        // 刷新一次又变回去，比直接失败更让人困惑。
+        state = before;
+        toast('导入失败：本地存储写入出错，当前数据没有变化', true);
+        break;
+      }
+      ui.modal = null;
+      ui.importPreview = null;
+      // 换了一份数据，视图层的临时状态全部作废（它们都指向旧数据）
+      ui.recordsExpanded = false;
+      ui.recordsDate = '';
+      ui.planView = 'current';
+      ui.planWeeks = 4;
+      render();
+      toast(
+        `已导入 ${next.runs.length} 条记录、${next.plans.length} 份计划、${next.workouts.length} 条训练历史`
+      );
       break;
     }
 
@@ -2152,8 +2492,148 @@ function handleClick(e) {
   }
 }
 
-/* ---------------- 保存记录 ---------------- */
+/* ---------------- 导出兜底 ---------------- */
 
+/**
+ * 导出失败时的最后一道：把 JSON 原样摆出来，让用户自己复制走。
+ *
+ * 只做这一层，不做 navigator.share / clipboard：
+ *   - share 是异步 promise，会打破"点完立刻有 toast"的契约，用户取消还会 reject；
+ *     而且 headless 里 canShare({files}) 返回真但 share() 永不 resolve，
+ *     打包前放一个测不到的分支是赌运气。
+ *   - clipboard 同理（权限 / 非安全上下文各种坑），同样测不稳。
+ * 这一层不依赖任何新 API（老 WebView 也能跑）、纯同步、可端到端验证，
+ * 而且桥坏掉的机型至少拿得到数据 —— 否则用户只看到一个失败提示，文件在哪都不知道。
+ */
+function openExportFallbackModal(filename, json) {
+  ui.exportFallback = { filename: filename, json: json };
+  ui.modal = { type: 'exportFallback' };
+  render();
+  // 打开就全选：直接长按复制，少一步操作
+  selectExportText();
+  toast('文件没能存到手机：已展开备份内容，复制出来粘到备忘录同样能导入', true);
+}
+
+/** 选中 textarea 里的整段备份；元素不在就当无事发生（弹层还没渲染等） */
+function selectExportText() {
+  const ta = document.getElementById('export-text');
+  if (!ta) return false;
+  try {
+    ta.focus();
+    ta.select();
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+/* ---------------- 保存训练历史的编辑 ---------------- */
+
+/**
+ * 把历史编辑写回两处：state.workouts（归档）和 state.runs（事实来源）。
+ *
+ * 为什么必须两处都写：记录页、VDOT、体能画像、配速趋势全部从 runs 算，
+ * 历史页的汇总从 workouts 算。只改一边，两个页面就会显示同一次训练的两个数字，
+ * 用户没法判断哪个是真的。
+ *
+ * 计划值（plan.days 的 distKm / paceText）一律不动 —— 那是排的计划，不是完成的数据。
+ */
+function saveHistoryEdit(key) {
+  const workouts = Array.isArray(state.workouts) ? state.workouts : [];
+  const idx = workouts.findIndex((x) => x && x.key === key);
+  if (idx < 0) {
+    // 连点两下、或者这条刚在别处删掉：给个交代，但不能报错
+    ui.modal = null;
+    render();
+    toast('这条历史已经不在了', true);
+    return;
+  }
+  const w = workouts[idx];
+
+  const titleEl = document.getElementById('he-title');
+  const distEl = document.getElementById('he-dist');
+  const noteEl = document.getElementById('he-note');
+
+  const title = titleEl ? String(titleEl.value).trim() : '';
+  if (!title) {
+    flagField('he-title', '标题不能空着，写「轻松跑 8km」这样就行');
+    return;
+  }
+
+  // 距离用文本输入自己清洗：中文输入法在 type=number 下会把值吞掉
+  const km = distEl ? parseFloat(String(distEl.value).replace(/[^\d.]/g, '')) : 0;
+  const sec = readDurationSec();
+  const v = validateActualEdit(km, sec);
+  if (!v.ok) {
+    flagField(v.field === 'dist' ? 'he-dist' : 'f-m', v.error);
+    return;
+  }
+
+  const note = noteEl ? String(noteEl.value).trim() : '';
+  const runId = w.actual && w.actual.runId ? String(w.actual.runId) : '';
+  const run = runId ? (state.runs || []).find((r) => r && r.id === runId) : null;
+
+  // 落盘前留底，写失败要能整体回滚（否则内存改了、存储没改，刷新回来全是旧值）
+  const wBefore = JSON.parse(JSON.stringify(w));
+  const runBefore = run ? JSON.parse(JSON.stringify(run)) : null;
+
+  w.title = title;
+
+  /*
+   * 只写归档，不新建跑步记录。
+   *
+   * 试过「补录时顺手建一条 run 让 VDOT 认它」，但那会重复计数：用户完全可能
+   * 那天已经手填过一条记录，再在历史里补录，跑量和 VDOT 就被算两次；
+   * 而"该合并到哪一条"没有可靠判据（同一天可能真有两次跑步）。
+   * 用户点的入口是「编辑历史」，不是「补录跑步记录」——
+   * 真要进统计，正确的动作是去「记录」页补一条，所以提示里直接告诉他怎么走。
+   */
+  w.actual = {
+    distKm: v.distKm,
+    durationSec: v.durationSec,
+    paceSec: v.paceSec,
+    note: note,
+    runId: runId,
+  };
+  if (run) {
+    run.distanceKm = v.distKm;
+    run.durationSec = v.durationSec;
+    run.note = note;
+  }
+
+  if (!commit()) {
+    workouts[idx] = wBefore;
+    if (run && runBefore) {
+      const ri = state.runs.indexOf(run);
+      if (ri >= 0) state.runs[ri] = runBefore;
+    }
+    // commit() 里已经按改后的数据重算过画像了，回滚后必须再算一次
+    recompute();
+    toast('保存失败：本地存储写入出错，请先到「我的」导出备份再试', true);
+    return;
+  }
+
+  ui.modal = null;
+  render();
+
+  /*
+   * 两支都带上日期：记录页默认只露最近 5 条，
+   * 补录/编辑的多半是几天前那节课 —— 只说"记录页那条也更新了"，
+   * 用户翻不到就会以为没生效。带上 M/D，他知道去哪天找；
+   * 只写归档那支也带日期，是为了让 toast 能和他刚才编辑的那一行对上。
+   */
+  const when = normalizeDateStr(w.date);
+  const whenTxt = when ? `（${Number(when.slice(5, 7))}/${when.slice(8, 10)}）` : '';
+  if (!runId) {
+    toast('已保存 · 只记在训练历史里' + whenTxt);
+  } else if (when) {
+    toast(`已保存 · 记录页 ${Number(when.slice(5, 7))}/${when.slice(8, 10)} 那条也跟着更新了`);
+  } else {
+    toast('已保存 · 记录页那条记录也跟着更新了');
+  }
+}
+
+/* ---------------- 保存记录 ---------------- */
 /** 把用户的注意力钉在出错的字段上：标红 + 抖动 + 滚进可视区 + 聚焦 */
 function flagField(id, msg) {
   const el = document.getElementById(id);
@@ -2186,25 +2666,15 @@ function saveRun(planId, dayId) {
   const date = dateEl && dateEl.value ? dateEl.value : toDateStr(new Date());
   const note = noteEl ? noteEl.value.trim() : '';
 
-  // 边界校验：挡在入库之前，别让脏数据污染整个趋势
-  if (!(km > 0)) {
-    flagField('f-dist', '先填一下跑了多少公里');
+  // 边界校验：挡在入库之前，别让脏数据污染整个趋势。
+  // 判据统一走 records.js —— 历史编辑写的是同一份事实（距离/用时/配速），
+  // 两处各写一套边界，早晚会在某次改动里分叉，表现为同一份数据两个页面结论不同。
+  const check = validateActualEdit(km, sec);
+  if (!check.ok) {
+    flagField(check.field === 'dist' ? 'f-dist' : 'f-m', check.error);
     return;
   }
-  if (km > 200) {
-    flagField('f-dist', '距离看起来不对，超过 200km 了');
-    return;
-  }
-  if (!(sec > 0)) {
-    // 三格里随便填一格就行，所以直接盯住"分"那格
-    flagField('f-m', '用时没填，时 / 分 / 秒随便填一格就行');
-    return;
-  }
-  const pace = sec / km;
-  if (pace < 120 || pace > 1200) {
-    flagField('f-m', `配速 ${C.fmtPace(pace)}/km 不合理，检查下距离和用时`);
-    return;
-  }
+  const pace = check.paceSec;
 
   // 三个可选指标：不填不影响记账，填了就要挡脏值。
   // 范围取人体可能的边界，不是"健康范围" —— 这里只防手滑，不做医学判断。
@@ -2410,6 +2880,12 @@ document.addEventListener('click', handleClick, true);
 document.addEventListener('change', (e) => {
   if (e.target && e.target.id === 'f-file') handleFileChange(e);
   if (e.target && e.target.id === 'f-plan-file') handlePlanFileChange(e);
+  // 日期筛选：原生日期选择器只在选完时 fire 一次 change，
+  // 这时候重绘是安全的（用户已经不在这个输入框里打字了）。
+  if (e.target && e.target.id === 'r-date') {
+    ui.recordsDate = String(e.target.value || '');
+    render();
+  }
 });
 
 // 老数据里打卡只在 plan.days 上，先补一遍归档，历史页才不会空

@@ -20,8 +20,11 @@ const BROWSER = [
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
 ].find((p) => fs.existsSync(p));
 
-const PORT = 8936;
-const CDP = 9349;
+// 端口/目录都不写死：CI 里连跑时，上一次的浏览器可能还没退干净 ——
+// 固定端口会 EADDRINUSE、固定 profile 会 EBUSY（CrashpadMetrics 被锁），
+// 两种都会让脚本第一步就崩，看起来像"功能挂了"，其实跟被测代码无关。
+let PORT = 0;
+let CDP = 0;
 const PROFILE = path.join(process.env.TEMP || '/tmp', 'pacelab_hist');
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -75,12 +78,30 @@ const check = (ok, msg, extra) => {
 
 (async () => {
   if (!BROWSER) { console.error('找不到浏览器'); process.exit(1); }
-  fs.rmSync(PROFILE, { recursive: true, force: true });
-  await new Promise((r) => srv.listen(PORT, '127.0.0.1', r));
+  let profileDir = PROFILE;
+  try {
+    fs.rmSync(PROFILE, { recursive: true, force: true });
+  } catch (e) {
+    profileDir = PROFILE + '_' + Date.now();
+    console.log('  （旧 profile 被占用，改用 ' + profileDir.split(/[\\/]/).pop() + '）');
+  }
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  PORT = srv.address().port;
   const chrome = spawn(BROWSER, [
     '--headless=new', '--disable-gpu', '--no-sandbox',
-    `--remote-debugging-port=${CDP}`, `--user-data-dir=${PROFILE}`, 'about:blank',
+    '--remote-debugging-port=0', `--user-data-dir=${profileDir}`, 'about:blank',
   ], { stdio: 'ignore' });
+
+  // Chrome 把实际调试端口写进 <profile>/DevToolsActivePort 首行
+  const portFile = path.join(profileDir, 'DevToolsActivePort');
+  for (let i = 0; i < 80; i++) {
+    try {
+      const first = fs.readFileSync(portFile, 'utf8').split('\n')[0].trim();
+      if (first) { CDP = Number(first); break; }
+    } catch (e) {}
+    await wait(200);
+  }
+  if (!CDP) { console.error('拿不到调试端口（DevToolsActivePort 没生成）'); process.exit(1); }
 
   let targets = null;
   for (let i = 0; i < 40; i++) {

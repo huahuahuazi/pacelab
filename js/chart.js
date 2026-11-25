@@ -18,9 +18,13 @@ function niceTicks(min, max, count = 4) {
 
 /** 把日期串转成 "M/D" */
 function shortDate(s) {
-  const d = new Date(s);
-  if (isNaN(d)) return String(s || '').slice(0, 5);
-  return `${d.getMonth() + 1}/${d.getDate()}`;
+  const str = String(s == null ? '' : s);
+  // 纯日期串直接读字符串里的月/日：走 new Date('2026-11-07') 会按 UTC 午夜解析，
+  // 在 UTC-5 这类负偏移时区上 getMonth/getDate 会退成前一天，
+  // 于是图的横轴和记录页的日期对不上（显示 11/6、数据其实是 11/7）。
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(str);
+  if (m) return `${Number(m[2])}/${Number(m[3])}`;
+  return str.slice(0, 5);
 }
 
 /**
