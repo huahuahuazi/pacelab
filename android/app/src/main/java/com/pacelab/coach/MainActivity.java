@@ -47,6 +47,7 @@ import java.nio.charset.StandardCharsets;
 import android.database.Cursor;
 import android.provider.OpenableColumns;
 import android.util.Base64;
+import android.util.Log;
 
 /**
  * 单 Activity 壳：只做三件事 —— 加载本地网页、接住文件选择、把导出文件落盘。
@@ -64,6 +65,8 @@ public class MainActivity extends Activity {
     private static final int REQ_FILE = 1001;
     /** 运行时麦克风权限的请求码。和文件选择分开，onActivityResult 才不会互相打架。 */
     private static final int REQ_AUDIO = 1002;
+
+    private static final String TAG = "PaceLabVoice";
 
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
@@ -492,20 +495,17 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 起一次识别。**从 JavaBridge 线程调用**，所以能力判定在这里做完，
-     * 真正的 recognizer 创建丢回主线程，本方法立刻返回 sessionId ——
-     * 网页侧拿到 id 之后才开始等事件。
+     * 起一次识别。**从 JavaBridge 线程调用**，所以这里不做任何 SpeechRecognizer 系
+     * 操作（那些 API 在部分机型上检查 Looper，非主线程直接抛
+     * "SpeechRecognizer should be used only on the application's main thread"，
+     * 到 JS 侧就是 WebView 裸报 "Java exception was raised during method invocation"）。
+     *
+     * 能力判定挪到主线程的 beginVoiceSession 里做；本方法立刻返回 sessionId，
+     * 网页侧拿到 id 之后才开始等事件。没有识别器时通过 error 事件告知（NOT_AVAILABLE）。
      */
     private String startVoice(String optsJson) {
         if (voice != null) {
             return "{\"ok\":false,\"code\":\"BUSY\",\"message\":\"上一次识别还没结束\"}";
-        }
-        boolean onDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-                && SpeechRecognizer.isOnDeviceRecognitionAvailable(this);
-        boolean system = SpeechRecognizer.isRecognitionAvailable(this);
-        if (!onDevice && !system) {
-            // 没有识别器时**不申请麦克风权限**：别让用户先授权再被拒
-            return "{\"ok\":false,\"code\":\"NOT_AVAILABLE\",\"message\":\"这台手机没有可用的语音识别\"}";
         }
         long maxMs = 20000;
         try {
@@ -515,33 +515,49 @@ public class MainActivity extends Activity {
         }
         final long limitMs = Math.max(3000, Math.min(60000, maxMs));
         final String sid = "s" + (++voiceSeq) + "-" + System.currentTimeMillis();
-        final int mode = onDevice ? VoiceSession.MODE_ON_DEVICE : VoiceSession.MODE_SYSTEM;
 
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                beginVoiceSession(sid, mode, limitMs);
+                beginVoiceSession(sid, limitMs);
             }
         });
 
-        return "{\"ok\":true,\"sessionId\":" + JSONObject.quote(sid)
-                + ",\"via\":" + JSONObject.quote(mode == VoiceSession.MODE_ON_DEVICE ? "ondevice" : "system") + "}";
+        // via 只是提示信息，真正的通道以 final 事件里的 source 为准
+        return "{\"ok\":true,\"sessionId\":" + JSONObject.quote(sid) + ",\"via\":\"system\"}";
     }
 
-    /** 主线程：建会话 → 有权限就直接开听，没权限先弹授权 */
-    private void beginVoiceSession(String sid, int mode, long limitMs) {
-        if (voice != null) {
-            emitError(voice.sessionId, "BUSY", "上一次识别还没结束", false, false);
-            return;
-        }
-        VoiceSession s = new VoiceSession(sid, mode, limitMs);
-        voice = s;
-        if (hasAudioPermission()) {
-            s.beginListening();
-        } else {
-            emitState(sid, "permission");
-            voicePref().edit().putBoolean("asked", true).apply();
-            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+    /** 主线程：判定能力 → 建会话 → 有权限就直接开听，没权限先弹授权 */
+    private void beginVoiceSession(String sid, long limitMs) {
+        try {
+            if (voice != null) {
+                emitError(voice.sessionId, "BUSY", "上一次识别还没结束", false, false);
+                return;
+            }
+            // SpeechRecognizer 系 API：现在一定在主线程上调用
+            boolean onDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                    && SpeechRecognizer.isOnDeviceRecognitionAvailable(this);
+            boolean system = SpeechRecognizer.isRecognitionAvailable(this);
+            if (!onDevice && !system) {
+                // 没有识别器时**不申请麦克风权限**：别让用户先授权再被拒
+                emitError(sid, "NOT_AVAILABLE", "这台手机没有可用的语音识别", true, true);
+                return;
+            }
+            final int mode = onDevice ? VoiceSession.MODE_ON_DEVICE : VoiceSession.MODE_SYSTEM;
+            VoiceSession s = new VoiceSession(sid, mode, limitMs);
+            voice = s;
+            if (hasAudioPermission()) {
+                s.beginListening();
+            } else {
+                emitState(sid, "permission");
+                voicePref().edit().putBoolean("asked", true).apply();
+                requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+            }
+        } catch (Exception e) {
+            // 主线程里再炸一次也不能把异常抛回 WebView
+            Log.e(TAG, "beginVoiceSession 失败", e);
+            voice = null;
+            emitError(sid, "JAVA_ERROR", "启动识别失败，请再试一次", true, false);
         }
     }
 
@@ -809,95 +825,154 @@ public class MainActivity extends Activity {
      * WebView 里 <a download> 的 blob 下载是不生效的，不给这条通路，导出功能就是死按钮。
      */
     private class Bridge {
+
+        /**
+         * Bridge 方法里抛出去的异常，到 JS 侧就是 WebView 的裸报错
+         * （"Java exception was raised during method invocation"）+ 功能挂掉。
+         * 任何 @JavascriptInterface 方法都必须包 try/catch，异常转成 JSON 返回，
+         * 并打 Log.e 方便 logcat 排查 —— 用户看到的是 App 里的错误提示，不是裸异常。
+         */
+        private String bridgeError(String method, Exception e) {
+            Log.e(TAG, method + " 失败", e);
+            String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            try {
+                return "{\"ok\":false,\"code\":\"JAVA_ERROR\",\"message\":"
+                        + JSONObject.quote(method + " 失败：" + msg) + "}";
+            } catch (Exception ignored) {
+                return "{\"ok\":false,\"code\":\"JAVA_ERROR\"}";
+            }
+        }
+
         /**
          * 网页来取「分享进来的文件」，返回 name\nmime\nbase64。
          * 取一次就清空：同一个文件不该被重复导入两遍。
          */
         @JavascriptInterface
         public String takeShared() {
-            String origin = web == null ? "" : web.getUrl();
-            if (origin == null || !origin.startsWith(APP_ORIGIN)) return "";
-            if (shareData == null) return "";
-            String name = shareName == null ? "shared.bin" : shareName;
-            String mime = shareMime == null ? "" : shareMime;
-            String b64 = Base64.encodeToString(shareData, Base64.NO_WRAP);
-            shareData = null;
-            shareName = null;
-            shareMime = null;
-            return name + "\n" + mime + "\n" + b64;
+            try {
+                String origin = web == null ? "" : web.getUrl();
+                if (origin == null || !origin.startsWith(APP_ORIGIN)) return "";
+                if (shareData == null) return "";
+                String name = shareName == null ? "shared.bin" : shareName;
+                String mime = shareMime == null ? "" : shareMime;
+                String b64 = Base64.encodeToString(shareData, Base64.NO_WRAP);
+                shareData = null;
+                shareName = null;
+                shareMime = null;
+                return name + "\n" + mime + "\n" + b64;
+            } catch (Exception e) {
+                return bridgeError("takeShared", e);
+            }
         }
 
         @JavascriptInterface
         public boolean saveText(String filename, String content) {
-            // 只允许自家页面调用，防止将来引入外部页面时被滥用
-            String origin = web == null ? "" : web.getUrl();
-            if (origin == null || !origin.startsWith(APP_ORIGIN)) return false;
             try {
-                byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    ContentValues cv = new ContentValues();
-                    cv.put(MediaStore.Downloads.DISPLAY_NAME, filename);
-                    cv.put(MediaStore.Downloads.MIME_TYPE, "application/json");
-                    cv.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
-                    Uri uri = getContentResolver()
-                            .insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
-                    if (uri == null) return false;
-                    OutputStream os = getContentResolver().openOutputStream(uri);
-                    if (os == null) return false;
-                    os.write(bytes);
-                    os.close();
-                    toastOnUi("已保存到「下载」目录：" + filename);
-                    return true;
-                }
-                // Android 9 及以下没有 MediaStore.Downloads，落到 App 私有目录（无需存储权限）
-                File dir = getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS);
-                if (dir == null) dir = getFilesDir();
-                File f = new File(dir, filename);
-                FileOutputStream fos = new FileOutputStream(f);
-                fos.write(bytes);
-                fos.close();
-                toastOnUi("已保存：" + f.getAbsolutePath());
-                return true;
+                return saveTextInner(filename, content);
             } catch (Exception e) {
+                Log.e(TAG, "saveText 失败", e);
                 toastOnUi("保存失败：" + e.getMessage());
                 return false;
             }
         }
 
+        private boolean saveTextInner(String filename, String content) throws Exception {
+            // 只允许自家页面调用，防止将来引入外部页面时被滥用
+            String origin = web == null ? "" : web.getUrl();
+            if (origin == null || !origin.startsWith(APP_ORIGIN)) return false;
+            byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ContentValues cv = new ContentValues();
+                cv.put(MediaStore.Downloads.DISPLAY_NAME, filename);
+                cv.put(MediaStore.Downloads.MIME_TYPE, "application/json");
+                cv.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+                Uri uri = getContentResolver()
+                        .insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+                if (uri == null) return false;
+                OutputStream os = getContentResolver().openOutputStream(uri);
+                if (os == null) return false;
+                os.write(bytes);
+                os.close();
+                toastOnUi("已保存到「下载」目录：" + filename);
+                return true;
+            }
+            // Android 9 及以下没有 MediaStore.Downloads，落到 App 私有目录（无需存储权限）
+            File dir = getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS);
+            if (dir == null) dir = getFilesDir();
+            File f = new File(dir, filename);
+            FileOutputStream fos = new FileOutputStream(f);
+            fos.write(bytes);
+            fos.close();
+            toastOnUi("已保存：" + f.getAbsolutePath());
+            return true;
+        }
+
         @JavascriptInterface
         public String platform() {
-            return "android-" + Build.VERSION.RELEASE;
+            try {
+                return "android-" + Build.VERSION.RELEASE;
+            } catch (Exception e) {
+                Log.e(TAG, "platform 失败", e);
+                return "android";
+            }
         }
 
         /* ---------------- 语音识别 ---------------- */
 
         /**
-         * 设备能力。跑在 JavaBridge 线程 —— 这三个 API 都允许非主线程调用。
+         * 设备能力。跑在 JavaBridge 线程 —— **不能再在这里调 SpeechRecognizer 系 API**
+         * （isRecognitionAvailable / isOnDeviceRecognitionAvailable 在部分机型的实现里
+         * 检查 Looper，非主线程直接抛 RuntimeException，弹层一打开全链路就挂）。
+         *
+         * 所以改成两段式：
+         *   同步返回一个 pending 占位（只含线程安全的信息：sdk / 权限状态）；
+         *   SpeechRecognizer 探测 post 到主线程，结果通过 capability 事件 dispatch 回 JS。
+         * JS 侧（js/voice-bridge.js capabilityAsync）等 capability 事件，或用缓存。
+         *
          * 注意 targetSdk>=30 时，没有 AndroidManifest 里的 <queries> 声明，
          * isRecognitionAvailable() 会**恒返回 false**，看起来像「用户没装识别器」。
          */
         @JavascriptInterface
         public String voiceCapability() {
-            if (!ownOrigin()) {
-                return "{\"sdk\":0,\"hasSystem\":false,\"hasOnDevice\":false,\"permission\":\"unknown\"}";
+            try {
+                if (!ownOrigin()) {
+                    return "{\"pending\":true,\"sdk\":0,\"hasSystem\":false,\"hasOnDevice\":false,\"permission\":\"unknown\"}";
+                }
+                // 线程安全的信息同步返回；SpeechRecognizer 探测必须去主线程
+                boolean granted = hasAudioPermission();
+                boolean asked = voicePref().getBoolean("asked", false);
+                String permission;
+                if (granted) {
+                    permission = "granted";
+                } else if (asked && !shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
+                    permission = "denied";
+                } else {
+                    permission = "prompt";
+                }
+                final String perm = permission;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            boolean hasSystem = SpeechRecognizer.isRecognitionAvailable(MainActivity.this);
+                            boolean hasOnDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                                    && SpeechRecognizer.isOnDeviceRecognitionAvailable(MainActivity.this);
+                            JSONObject o = event("capability", null);
+                            o.put("sdk", Build.VERSION.SDK_INT);
+                            o.put("hasSystem", hasSystem);
+                            o.put("hasOnDevice", hasOnDevice);
+                            o.put("permission", perm);
+                            emit(o);
+                        } catch (Exception e) {
+                            Log.e(TAG, "voiceCapability 主线程探测失败", e);
+                        }
+                    }
+                });
+                return "{\"pending\":true,\"sdk\":" + Build.VERSION.SDK_INT
+                        + ",\"permission\":" + JSONObject.quote(permission) + "}";
+            } catch (Exception e) {
+                return bridgeError("voiceCapability", e);
             }
-            boolean hasSystem = SpeechRecognizer.isRecognitionAvailable(MainActivity.this);
-            boolean hasOnDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-                    && SpeechRecognizer.isOnDeviceRecognitionAvailable(MainActivity.this);
-            boolean granted = hasAudioPermission();
-            boolean asked = voicePref().getBoolean("asked", false);
-            String permission;
-            if (granted) {
-                permission = "granted";
-            } else if (asked && !shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
-                permission = "denied";
-            } else {
-                permission = "prompt";
-            }
-            return "{\"sdk\":" + Build.VERSION.SDK_INT
-                    + ",\"hasSystem\":" + hasSystem
-                    + ",\"hasOnDevice\":" + hasOnDevice
-                    + ",\"permission\":" + JSONObject.quote(permission) + "}";
         }
 
         /**
@@ -906,20 +981,24 @@ public class MainActivity extends Activity {
          */
         @JavascriptInterface
         public String voiceRequestMic() {
-            if (!ownOrigin()) return "{\"state\":\"denied\"}";
-            if (hasAudioPermission()) return "{\"state\":\"granted\"}";
-            boolean asked = voicePref().getBoolean("asked", false);
-            if (asked && !shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
-                return "{\"state\":\"denied\"}";
-            }
-            runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    voicePref().edit().putBoolean("asked", true).apply();
-                    requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+            try {
+                if (!ownOrigin()) return "{\"state\":\"denied\"}";
+                if (hasAudioPermission()) return "{\"state\":\"granted\"}";
+                boolean asked = voicePref().getBoolean("asked", false);
+                if (asked && !shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
+                    return "{\"state\":\"denied\"}";
                 }
-            });
-            return "{\"state\":\"prompt\"}";
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        voicePref().edit().putBoolean("asked", true).apply();
+                        requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+                    }
+                });
+                return "{\"state\":\"prompt\"}";
+            } catch (Exception e) {
+                return bridgeError("voiceRequestMic", e);
+            }
         }
 
         /**
@@ -928,37 +1007,72 @@ public class MainActivity extends Activity {
          */
         @JavascriptInterface
         public String voiceStart(String optsJson) {
-            if (!ownOrigin()) {
-                return "{\"ok\":false,\"code\":\"CLIENT\",\"message\":\"非法来源\"}";
+            try {
+                if (!ownOrigin()) {
+                    return "{\"ok\":false,\"code\":\"CLIENT\",\"message\":\"非法来源\"}";
+                }
+                return startVoice(optsJson);
+            } catch (Exception e) {
+                return bridgeError("voiceStart", e);
             }
-            return startVoice(optsJson);
+        }
+
+        /**
+         * 松开按钮时收尾：让识别器把已经听到的内容吐成结果（stopListening），
+         * 不是取消。传空串表示「当前会话」。
+         */
+        @JavascriptInterface
+        public void voiceStop(String sessionId) {
+            try {
+                if (!ownOrigin()) return;
+                final String sid = sessionId == null ? "" : sessionId;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            VoiceSession s = voice;
+                            if (s == null) return;
+                            if (sid.length() == 0 || sid.equals(s.sessionId)) s.stopSoftly();
+                        } catch (Exception e) {
+                            Log.e(TAG, "voiceStop 主线程执行失败", e);
+                        }
+                    }
+                });
+            } catch (Exception e) {
+                Log.e(TAG, "voiceStop 失败", e);
+            }
         }
 
         /** 取消会话。传空串表示「不管当前是哪个，全部收掉」。 */
         @JavascriptInterface
         public void voiceCancel(String sessionId) {
-            if (!ownOrigin()) return;
-            final String sid = sessionId == null ? "" : sessionId;
-            runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    VoiceSession s = voice;
-                    if (s == null) return;
-                    if (sid.length() == 0 || sid.equals(s.sessionId)) s.cancel();
-                }
-            });
+            try {
+                if (!ownOrigin()) return;
+                final String sid = sessionId == null ? "" : sessionId;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        VoiceSession s = voice;
+                        if (s == null) return;
+                        if (sid.length() == 0 || sid.equals(s.sessionId)) s.cancel();
+                    }
+                });
+            } catch (Exception e) {
+                Log.e(TAG, "voiceCancel 失败", e);
+            }
         }
 
         /** 权限被永久拒绝时唯一的出路：跳到本 App 的系统设置页 */
         @JavascriptInterface
         public void openAppSettings() {
-            if (!ownOrigin()) return;
             try {
+                if (!ownOrigin()) return;
                 Intent i = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
                 i.setData(Uri.parse("package:" + getPackageName()));
                 i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 startActivity(i);
             } catch (Exception e) {
+                Log.e(TAG, "openAppSettings 失败", e);
                 toastOnUi("打不开设置页，请手动到「设置 → 应用」里开权限");
             }
         }

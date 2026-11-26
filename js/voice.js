@@ -170,8 +170,19 @@ export async function runVoice(opts) {
   try {
     setState(VOICE_STATE.CHECKING);
     const prefs = bridge.prefs();
-    const cap = bridge.isBridgeReady() ? bridge.capability() : { sdk: 0, hasSystem: false, hasOnDevice: false, permission: 'unknown' };
+    // v1.12.1：能力探测是异步的（Java 要回主线程才能调 SpeechRecognizer 系 API），
+    // 必须等 capabilityAsync；旧版 APK / 缓存命中时这个 await 立刻返回，不多等一帧
+    const cap = bridge.isBridgeReady()
+      ? await bridge.capabilityAsync()
+      : { sdk: 0, hasSystem: false, hasOnDevice: false, permission: 'unknown' };
     const channel = chooseChannel(cap, prefs);
+
+    // 长按被取消（<400ms 误触 / 滑出 / 关弹层）后，能力探测的 await 期间可能已经
+    // 过去了 —— 这里必须拦住，否则会话已经取消还继续去调 voiceStart
+    // （复现：按下 A 在探测窗口挂起 → <400ms 松开 → 立即重按 B → 探测超时放行
+    //   两个 waiter → A 复活占住麦克风和 bridge.pending → B 撞 BUSY 被挤去离线）
+    // 这条防线由 tests/voice-abort-guard.test.mjs 钉住，删除前先跑它。
+    if (token.aborted) throw { code: 'ABORTED', message: '用户取消' };
 
     let systemError = null;
 
@@ -202,7 +213,7 @@ export async function runVoice(opts) {
         return { text: text, parsed: parsed, via: 'system', source: (res && res.source) || 'system', channel: 'system' };
       } catch (e) {
         const code = (e && e.code) || 'UNKNOWN';
-        if (code === 'ABORTED') throw e;
+
         // 权限/音频被占用：两条通道都要麦克风，降级没有意义
         if (bridge.isFatalNoFallback(code)) {
           setState(code === 'PERM_DENIED' ? VOICE_STATE.PERM_DENIED : VOICE_STATE.FAILED);
@@ -248,6 +259,8 @@ export async function runVoice(opts) {
         if (!token.aborted) onProgress(p);
       });
     } catch (e) {
+      // 用户已经取消（关弹层/误触）：按取消处理，别把失败记忆和错误文案留下来
+      if (token.aborted) throw { code: 'ABORTED', message: '用户取消' };
       // 模型缺失/校验失败/OOM：记下来，别让用户每次点都等 5 秒再失败
       writeOfflineBroken(true);
       setState(VOICE_STATE.FAILED);
@@ -311,6 +324,26 @@ export function abort() {
     /* 忽略 */
   }
   lastState = VOICE_STATE.IDLE;
+}
+
+/**
+ * 松开按钮时收尾当前识别（不是取消）：
+ * 系统通道 voiceStop（Java stopListening → onResults 吐出最终结果）；
+ * 离线通道手动 finalize（停止 VAD 等待，用已积累的音频出 final）。
+ * 会话还没真正开始听（还在加载模型/等能力探测）时两者都是 no-op，
+ * 之后由 VAD 静音自动收尾兑底。
+ */
+export function stopCurrent() {
+  try {
+    bridge.stop();
+  } catch (e) {
+    /* 忽略 */
+  }
+  try {
+    offline.finalize();
+  } catch (e) {
+    /* 忽略 */
+  }
 }
 
 /** 用户点「重试系统识别」：清掉「本机坏了」的记忆（离线坏记忆一并清） */

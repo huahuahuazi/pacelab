@@ -51,7 +51,11 @@ async function driveError(code, opts) {
   await tick(); // 让 recognize 设置 pending 并调用 voiceStart
   window.__PaceLabVoice._handle({
     t: 'error', code: code, message: opts.message || 'x',
-    fatal: true, permanent: opts.permanent,
+    fatal: true,
+    // 对齐真实 Java 协议：emitError 恒带 permanent 字段，NOT_AVAILABLE 固定 true。
+    // 之前这里缺省 undefined → handleEvent 强转 false → NOT_AVAILABLE 永不记坏，
+    // 是测试期望过期造成的假红（2026-11-26 第 2 轮 QA 修正）。
+    permanent: opts.permanent !== undefined ? opts.permanent : true,
     sessionId: 's1',
   });
   let thrown = null;

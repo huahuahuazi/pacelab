@@ -1418,6 +1418,12 @@ select.input {
   font-weight: 600;
   cursor: pointer;
   font-family: inherit;
+  /* 长按说话：禁掉浏览器手势接管（滚动/缩放会发 pointercancel 掐断录音）
+     和长按文本选择，否则按住不到一秒录音就被系统抢走 */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 .voice-btn:active { transform: scale(0.97); }
 .voice-btn[disabled] {

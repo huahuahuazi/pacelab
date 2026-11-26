@@ -13,9 +13,11 @@
  * 协议细节见 docs/语音录入设计.md §3。这个文件不碰 DOM、不碰样式，只管协议。
  */
 
-/** 存储键与协议版本。协议变了必须换版本号，否则旧的「本机坏了」记忆会赖着不走。 */
+/** 存储键与协议版本。协议变了必须换版本号，否则旧的「本机坏了」记忆会赖着不走。
+ *  v2（1.12.1）：capability 改异步 + 新增 voiceStop；同时清掉 v1 时期因主线程崩溃
+ *  被误记的 systemBroken（那个「坏」是线程 bug，不是机器真的不行）。 */
 const PREFS_KEY = 'pacelab.voice.v1';
-const PROTO_VERSION = 1;
+const PROTO_VERSION = 2;
 
 /** 识别器被杀 / 回调不再来时的兜底时间（在 maxMs 之上再加 10s） */
 const TIMEOUT_SLACK_MS = 10000;
@@ -30,13 +32,25 @@ export const VOICE_EVENT = {
   FINAL: 'final',
   ERROR: 'error',
   PERMISSION: 'permission',
+  /** Java 主线程上探测完能力后异步回传（v1.12.1：SpeechRecognizer 系 API 收口到主线程） */
+  CAPABILITY: 'capability',
 };
+
+/** 等能力事件回来的超时。真机上是毫秒级；旧版 APK 不发这个事件，靠它兑底。 */
+const CAPABILITY_WAIT_MS = 2500;
 
 /** 当前挂起的会话 */
 let pending = null;
 
 /** 等权限结果的回调（requestMic 用） */
 let permissionWaiters = [];
+
+/**
+ * 能力缓存。v1.12.1 起 capability 是**异步**的（Java 要回主线程才能探测），
+ * capability 事件回来后存这里，之后所有同步读取都走缓存。
+ */
+let capCache = null;
+let capWaiters = [];
 
 /* ==================================================================
  * 偏好记忆
@@ -141,21 +155,72 @@ function parseJson(str, fallback) {
   }
 }
 
+function normalizeCap(raw) {
+  return {
+    sdk: Number(raw && raw.sdk) || 0,
+    hasSystem: !!(raw && raw.hasSystem),
+    hasOnDevice: !!(raw && raw.hasOnDevice),
+    permission: raw && (raw.permission === 'granted' || raw.permission === 'denied') ? raw.permission : 'prompt',
+  };
+}
+
 /**
- * 探测设备能力。
- * @returns {{sdk:number, hasSystem:boolean, hasOnDevice:boolean, permission:'granted'|'denied'|'prompt'|'unknown'}}
+ * 同步读取能力。优先用 capability 事件带来的缓存；
+ * 没有缓存时同步调一次 voiceCapability()：旧版 APK 返回完整结构，直接可用；
+ * 新版 APK 返回 pending 占位 —— 按「有系统识别」处理，真正没有时 start 会给出准确错误。
  */
 export function capability() {
-  const unknown = { sdk: 0, hasSystem: false, hasOnDevice: false, permission: 'unknown' };
-  if (!isBridgeReady()) return unknown;
-  const raw = parseJson(window.AndroidBridge.voiceCapability(), null);
-  if (!raw) return unknown;
-  return {
-    sdk: Number(raw.sdk) || 0,
-    hasSystem: !!raw.hasSystem,
-    hasOnDevice: !!raw.hasOnDevice,
-    permission: raw.permission === 'granted' || raw.permission === 'denied' ? raw.permission : 'prompt',
-  };
+  if (capCache) return capCache;
+  if (!isBridgeReady()) return { sdk: 0, hasSystem: false, hasOnDevice: false, permission: 'unknown' };
+  let raw = null;
+  try {
+    raw = parseJson(window.AndroidBridge.voiceCapability(), null);
+  } catch (e) {
+    raw = null;
+  }
+  if (!raw) return { sdk: 0, hasSystem: false, hasOnDevice: false, permission: 'unknown' };
+  if (raw.pending) {
+    return { sdk: Number(raw.sdk) || 0, hasSystem: true, hasOnDevice: false, permission: 'unknown' };
+  }
+  capCache = normalizeCap(raw);
+  return capCache;
+}
+
+/**
+ * 异步探测能力（v1.12.1 起的首选入口）。
+ *
+ * 新版 APK 的 voiceCapability() 只同步回一个 pending 占位，
+ * 真实结果通过 capability 事件异步回来 —— 这里负责把它拼成 Promise。
+ * 缓存命中或旧版 APK（同步返完整结构）则立刻 resolve，不会多等一帧。
+ *
+ * @returns {Promise<{sdk:number, hasSystem:boolean, hasOnDevice:boolean, permission:string}>}
+ */
+export function capabilityAsync() {
+  if (capCache) return Promise.resolve(capCache);
+  if (!isBridgeReady()) {
+    return Promise.resolve({ sdk: 0, hasSystem: false, hasOnDevice: false, permission: 'unknown' });
+  }
+  let raw = null;
+  try {
+    raw = parseJson(window.AndroidBridge.voiceCapability(), null);
+  } catch (e) {
+    raw = null;
+  }
+  if (raw && !raw.pending) {
+    capCache = normalizeCap(raw);
+    return Promise.resolve(capCache);
+  }
+  // pending：Java 正在主线程上探测，等 capability 事件
+  return new Promise(function (resolve) {
+    const waiter = { resolve: resolve, timer: null };
+    waiter.timer = setTimeout(function () {
+      const idx = capWaiters.indexOf(waiter);
+      if (idx >= 0) capWaiters.splice(idx, 1);
+      // 探测没回来也别卡死用户：按「有系统识别」去试，真正没有时 start 会给出准确错误
+      resolve({ sdk: 0, hasSystem: true, hasOnDevice: false, permission: 'unknown' });
+    }, CAPABILITY_WAIT_MS);
+    capWaiters.push(waiter);
+  });
 }
 
 /* ==================================================================
@@ -224,6 +289,17 @@ function handleEvent(ev) {
       for (let i = 0; i < waiters.length; i++) {
         if (waiters[i].timer) clearTimeout(waiters[i].timer);
         waiters[i].resolve(granted);
+      }
+      break;
+    }
+
+    case VOICE_EVENT.CAPABILITY: {
+      capCache = normalizeCap(ev);
+      const cWaiters = capWaiters;
+      capWaiters = [];
+      for (let i = 0; i < cWaiters.length; i++) {
+        if (cWaiters[i].timer) clearTimeout(cWaiters[i].timer);
+        cWaiters[i].resolve(capCache);
       }
       break;
     }
@@ -327,7 +403,9 @@ export function recognize(opts) {
       res = parseJson(window.AndroidBridge.voiceStart(optsJson), null);
     } catch (e) {
       pending = null;
-      reject({ code: 'CLIENT', message: '调用原生识别失败：' + (e && e.message) });
+      // 调用层抛异常（WebView 的裸 "Java exception..."）只说明这一次调用失败，
+      // 不代表识别器坏了 —— permanent:false，别把它记成「本机永久不行」。
+      reject({ code: 'CLIENT', message: '调用原生识别失败：' + (e && e.message), permanent: false });
       return;
     }
 
@@ -355,6 +433,23 @@ export function recognize(opts) {
       settle({ code: code, message: '识别超时', fatal: true }, true);
     }, maxMs + TIMEOUT_SLACK_MS);
   });
+}
+
+/**
+ * 松开按钮：让识别器把已听到的内容收尾成结果（不是取消）。
+ * 系统通道走 voiceStop（Java stopListening → onResults）；
+ * 旧版 APK 没有这个方法时返回 false，调用方保持原有的 VAD 自动收尾。
+ */
+export function stop() {
+  if (!isBridgeReady()) return false;
+  const b = window.AndroidBridge;
+  if (typeof b.voiceStop !== 'function') return false;
+  try {
+    b.voiceStop(pending && pending.sessionId ? pending.sessionId : '');
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 /** 取消当前识别。关弹层、切页、用户再点一次按钮都要走这里。 */

@@ -147,7 +147,7 @@ try{
   click('voice:start'); await sleep(40);
   window.__emit({t:'state',s:'listening',sessionId:window.__fake.sid});
   await sleep(30);
-  // 识别中点「说完了」= 取消
+  // 识别中点「松开结束」按钮 = 取消（长按交互下正常松开由 pointer 管线收尾并压掉 click）
   const stopBtn=byAct('voice:stop');
   check('识别中有取消按钮', !!stopBtn);
   if(stopBtn) stopBtn.click();
@@ -158,8 +158,8 @@ try{
   window.__emit({t:'final',text:window.__fake.sid==='s2'?'今天跑了十公里':'x',source:'ondevice',sessionId:window.__fake.sid});
   await sleep(60);
   check('取消后迟到结果不填字段', val('f-dist')===distBeforeLate, 'f-dist='+val('f-dist'));
-  // 语音区回到可再开始态
-  check('取消后语音区回到「说一句」', ($('#voice-box').textContent||'').indexOf('说一句')>=0, $('#voice-box').textContent);
+  // 语音区回到可再开始态（长按交互的默认按钮文案）
+  check('取消后语音区回到「按住说话」', ($('#voice-box').textContent||'').indexOf('按住说话')>=0, $('#voice-box').textContent);
 
   // ===== saveRun source 断言：语音录入记为 manual =====
   // 用一个干净的成功识别，填出合法数据后保存
@@ -214,9 +214,9 @@ function end(code){
   console.log('\n===== QA-E2E 结果 =====');
   console.log(`  通过 ${S.ok} / 失败 ${S.fail}`);
   for(const f of S.failures) console.log('   FAIL '+f.name+' :: '+f.detail);
-  if(S.web) console.log(`  网页版：${S.web.hasBox?'有语音区':'无语音区'} / ${(S.web.text.indexOf('说一句')>=0)?'!!显示语音按钮(不应)':'未显示语音按钮 OK'}`);
+  if(S.web) console.log(`  网页版：${S.web.hasBox?'有语音区':'无语音区'} / ${(S.web.text.indexOf('按住说话')>=0)?'!!显示语音按钮(不应)':'未显示语音按钮 OK'}`);
   else { console.log('  !! 网页版没跑'); process.exit(1); }
-  if(S.web&&S.web.text.indexOf('说一句')>=0) code=1;
+  if(S.web&&S.web.text.indexOf('按住说话')>=0) code=1;
   process.exit(code);
 }
 const cb=http.createServer((req,res)=>{

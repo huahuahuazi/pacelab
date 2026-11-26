@@ -513,6 +513,12 @@ export async function transcribeStreaming(opts) {
         session.timer = setTimeout(fallback, 1500);
       };
 
+      // 松开按钮时的手动收尾入口（session.finalizeFn → 模块级 finalize()）。
+      // 与 VAD 自动收尾走同一条路：冲静音 → 等 result → partial 兜底。
+      session.finalizeFn = function () {
+        if (!finished && !session.closed) conclude();
+      };
+
       attachEvents(recognizer, {
         onResult: function (text) {
           if (session.timer) clearTimeout(session.timer);
@@ -635,6 +641,16 @@ function cleanupSession(session) {
   } catch (e) {
     /* 忽略 */
   }
+}
+
+/**
+ * 手动收尾当前录音（长按松开的入口，与 abort 的「取消」语义不同）。
+ * 停止 VAD 等待，用已积累的音频出 final；
+ * 没有活动会话（还在加载模型/没开始听）时是 no-op，之后由 VAD 自动收尾兜底。
+ */
+export function finalize() {
+  const s = active;
+  if (s && typeof s.finalizeFn === 'function') s.finalizeFn();
 }
 
 /** 立即收尾当前录音。关弹层、用户再点一次按钮都走这里。 */

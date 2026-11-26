@@ -13,6 +13,10 @@
  *   5. 权限被拒 → 文案是「去设置」而不是「改用离线」（离线也要麦克风）
  *   6. 关弹层会 voiceCancel，不当场收掉的话下一次弹层会被迟到结果污染
  *   7. 网页版（没有 AndroidBridge）不显示语音按钮
+ *   8. v1.12.1：能力探测走异步协议（voiceCapability 回 pending，等 capability 事件）
+ *   9. 长按说话：按下立刻开始、<400ms 取消、滑出取消、录音态文案「松开结束」、
+ *      松开触发 voiceStop 收尾且结果照常填表
+ *  10. Bridge 方法抛异常 → UI 显示人话错误，不是裸异常字符串
  *
  * 跑：node tools/verify-voice.mjs
  */
@@ -70,18 +74,24 @@ const HARNESS_HTML = `<!doctype html>
 <div id="toast" class="toast" hidden></div>
 <script>
 /**
- * 假原生桥。
+ * 假原生桥。协议对齐 v1.12.1 的真实 Java 侧：
+ *   - voiceCapability 同步只回 pending 占位，真实能力通过 capability 事件异步回传
+ *   - 新增 voiceStop（长按松开时收尾，不是取消）
  * 只实现协议，不实现识别 —— 事件由用例脚本手动 dispatch 回来，
  * 这样「系统识别说什么」完全可控，测试不依赖麦克风和网络。
  */
-window.__fake = { starts: 0, cancels: 0, settings: 0, lastOpts: null, mode: 'ok', events: [] };
+window.__fake = { starts: 0, stops: 0, cancels: 0, settings: 0, lastOpts: null, mode: 'ok', events: [] };
 
 window.AndroidBridge = {
   platform: function () { return 'android-fake'; },
   voiceCapability: function () {
     var m = window.__fake.mode;
     var perm = m === 'permDenied' ? 'denied' : 'granted';
-    return JSON.stringify({ sdk: 34, hasSystem: m !== 'none', hasOnDevice: m !== 'none', permission: perm });
+    // 模拟真机：真实能力要回主线程探测，这里用 setTimeout 模拟异步 dispatch
+    setTimeout(function () {
+      window.__emit({ t: 'capability', sdk: 34, hasSystem: m !== 'none', hasOnDevice: m !== 'none', permission: perm });
+    }, 0);
+    return JSON.stringify({ pending: true, sdk: 34, permission: perm });
   },
   voiceRequestMic: function () {
     return JSON.stringify({ state: window.__fake.mode === 'permDenied' ? 'denied' : 'granted' });
@@ -90,11 +100,13 @@ window.AndroidBridge = {
     var f = window.__fake;
     f.starts++;
     f.lastOpts = optsJson;
+    if (f.mode === 'jsthrow') throw new Error('Java exception was raised during method invocation');
     if (f.mode === 'none') return JSON.stringify({ ok: false, code: 'NOT_AVAILABLE', message: '没有识别器' });
     var sid = 's' + f.starts;
     f.sid = sid;
     return JSON.stringify({ ok: true, sessionId: sid, via: 'ondevice' });
   },
+  voiceStop: function (sid) { window.__fake.stops++; },
   voiceCancel: function (sid) { window.__fake.cancels++; },
   openAppSettings: function () { window.__fake.settings++; }
 };
@@ -104,6 +116,20 @@ window.__emit = function (obj) {
   window.__fake.events.push(obj);
   var s = JSON.stringify(obj);
   if (window.__PaceLabVoice && window.__PaceLabVoice.dispatch) window.__PaceLabVoice.dispatch(s);
+};
+
+/**
+ * headless 里不加载真模型：让离线模型请求立刻 404（毫秒级失败），
+ * 用例只关心「系统通道失败后的降级/UI 流程」，不关心 42MB 的下载速度。
+ * 不这么做的话，本机存在 model.tgz 时用例会真的去下载，时序抖动导致断言漏拍。
+ */
+var __origFetch = window.fetch.bind(window);
+window.fetch = function (input, init) {
+  var url = typeof input === 'string' ? input : (input && input.url) || '';
+  if (url.indexOf('model.tgz') >= 0) {
+    return Promise.resolve(new Response('', { status: 404, statusText: 'Not Found' }));
+  }
+  return __origFetch(input, init);
 };
 </script>
 <script type="module" src="/js/app.js"></script>
@@ -115,6 +141,17 @@ const report = (obj) => {
   fetch('http://127.0.0.1:${CB_PORT}/r?d=' + s, { mode: 'no-cors' }).catch(() => {});
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** 轮询等待条件成立；异步链路的时序不能靠固定 sleep 硬猜 */
+const waitUntil = async (fn, timeoutMs) => {
+  const t0 = Date.now();
+  for (;;) {
+    let v = false;
+    try { v = !!fn(); } catch (e) { v = false; }
+    if (v) return true;
+    if (Date.now() - t0 > (timeoutMs || 3000)) return false;
+    await sleep(25);
+  }
+};
 const $ = (sel) => document.querySelector(sel);
 const byAct = (act) => document.querySelector('[data-act="' + act + '"]');
 const val = (id) => { const el = document.getElementById(id); return el ? el.value : null; };
@@ -136,6 +173,9 @@ async function openModal() {
   click('open:add');
   await sleep(30);
   if (!$('#voice-box')) throw new Error('弹层里没有 #voice-box');
+  // 等上一条用例的语音会话完全落地（迟到失败/取消不再改 UI），避免撞 BUSY 或状态残留
+  await waitUntil(() => !!$('#voice-box .voice-btn') && $('#voice-box .voice-btn').textContent.indexOf('按住说话') >= 0, 5000);
+  await sleep(80);
 }
 
 async function closeModal() {
@@ -150,7 +190,7 @@ async function closeModal() {
 
     /* ---------- 用例 1：成功识别 → 四字段填入 ---------- */
     await openModal();
-    check('语音区默认是「说一句」按钮', !!$('#voice-box .voice-btn') && $('#voice-box .voice-btn').textContent.indexOf('说') >= 0);
+    check('语音区默认是「按住说话」按钮', !!$('#voice-box .voice-btn') && $('#voice-box .voice-btn').textContent.indexOf('按住说话') >= 0, $('#voice-box').textContent);
     check('语音区标注了「识别在本机完成，不上传」', ($('#voice-box').textContent || '').indexOf('不上传') >= 0);
 
     // 用户先手打了一些语音不会碰的字段，稍后要验证它没被清掉
@@ -158,8 +198,9 @@ async function closeModal() {
     document.getElementById('f-stride').value = '110';
 
     click('voice:start');
-    await sleep(40);
+    await sleep(60);
     check('点按钮后调用了 voiceStart', window.__fake.starts === 1, 'starts=' + window.__fake.starts);
+    check('能力探测走异步协议（capability 事件回传）', (window.__fake.events || []).filter(function (e) { return e.t === 'capability'; }).length >= 1, JSON.stringify(window.__fake.events));
     check('voiceStart 带上了 zh-CN 与 maxMs', /zh-CN/.test(String(window.__fake.lastOpts)) && /maxMs/.test(String(window.__fake.lastOpts)), window.__fake.lastOpts);
 
     window.__emit({ t: 'state', s: 'listening', sessionId: window.__fake.sid });
@@ -207,11 +248,14 @@ async function closeModal() {
     click('voice:start');
     await sleep(40);
     window.__emit({ t: 'error', code: 'NO_MATCH', message: '没听清', fatal: true, sessionId: window.__fake.sid });
-    // 降级去离线：headless 里没有模型可用路径，等的就是「失败态有可操作按钮」
-    await sleep(2500);
+    // 降级去离线：模型请求已被 harness 拦成 404，等失败态出现（可操作按钮）
+    await waitUntil(() => {
+      const t = ($('#voice-box').textContent || '');
+      return t.indexOf('再说一次') >= 0 || t.indexOf('手动填') >= 0;
+    }, 5000);
     const boxText = $('#voice-box').textContent || '';
     check('系统识别失败后语音区给出可操作提示（再说一次/手动填）',
-      boxText.indexOf('再说一次') >= 0 || boxText.indexOf('手动填') >= 0 || boxText.indexOf('准备离线模型') >= 0, boxText);
+      boxText.indexOf('再说一次') >= 0 || boxText.indexOf('手动填') >= 0, boxText);
     await closeModal();
 
     /* ---------- 用例 5：权限被拒 → 去设置 ---------- */
@@ -252,7 +296,8 @@ async function closeModal() {
     click('voice:start');
     await sleep(40);
     window.__emit({ t: 'error', code: 'CLIENT', message: '识别器真的坏了', fatal: true, permanent: true, sessionId: window.__fake.sid });
-    await sleep(120);
+    // 拉黑后走离线，模型请求被拦成 404 → 失败态带「重试系统识别」逃生门
+    await waitUntil(() => ($('#voice-box').textContent || '').indexOf('重试系统识别') >= 0, 5000);
     let prefs2 = {};
     try { prefs2 = JSON.parse(localStorage.getItem('pacelab.voice.v1') || '{}'); } catch (e) {}
     check('CLIENT + permanent:true 仍然记永久坏', prefs2.systemBroken === true, JSON.stringify(prefs2));
@@ -269,11 +314,85 @@ async function closeModal() {
     window.__fake.mode = 'none';
     await openModal();
     click('voice:start');
-    await sleep(80);
+    await waitUntil(() => {
+      const t = ($('#voice-box').textContent || '');
+      return t.indexOf('手动填') >= 0 || t.indexOf('再说一次') >= 0;
+    }, 5000);
     const noneText = $('#voice-box').textContent || '';
     check('没有识别器时 voiceStart 返回 ok:false 并提示再试/手动填',
       noneText.indexOf('再说一次') >= 0 || noneText.indexOf('手动填') >= 0, noneText);
     await closeModal();
+
+    /* ---------- 用例 9：长按说话（pointer 管线） ---------- */
+    // 交互契约：按下（pointerdown）立刻开始 → 松开（pointerup）自动收尾出结果；
+    // <400ms 视为误触取消；滑出按钮热区 / pointercancel 按取消处理。
+    try { localStorage.removeItem('pacelab.voice.v1'); localStorage.removeItem('pacelab.voice.offline.v1'); } catch (e) {}
+    window.__fake.mode = 'ok';
+    await openModal();
+    const PE = function (type, x, y) {
+      return new PointerEvent(type, {
+        bubbles: true, cancelable: true, pointerId: 7, pointerType: 'touch',
+        isPrimary: true, clientX: x || 20, clientY: y || 20,
+      });
+    };
+    const startsBefore9 = window.__fake.starts;
+
+    // 误触：<400ms 松开 → 取消 + 提示（pointerup 必须在 400ms 内派发，不能先等录音态）
+    const micBtn = byAct('voice:start');
+    micBtn.dispatchEvent(PE('pointerdown'));
+    await sleep(30);
+    document.dispatchEvent(PE('pointerup', 20, 20));
+    await waitUntil(() => ($('#toast').textContent || '').indexOf('按住说话') >= 0, 2000);
+    check('长按：按下触发了 voiceStart', window.__fake.starts > startsBefore9, 'starts=' + window.__fake.starts);
+    check('<400ms 松开不当作一次识别（会话被取消）', window.__fake.cancels >= 1, 'cancels=' + window.__fake.cancels);
+    check('<400ms 松开后语音区回到「按住说话」', ($('#voice-box').textContent || '').indexOf('按住说话') >= 0, $('#voice-box').textContent);
+    check('<400ms 松开给出「按住说话」提示', ($('#toast').textContent || '').indexOf('按住说话') >= 0, $('#toast').textContent);
+
+    // 正常长按 → 松开：voiceStop 收尾，final 结果照常填表
+    const stopsBefore = window.__fake.stops || 0;
+    const cancelsBeforeHold = window.__fake.cancels;
+    const micBtn2 = byAct('voice:start');
+    micBtn2.dispatchEvent(PE('pointerdown'));
+    await waitUntil(() => !!document.querySelector('#voice-box .voice-btn.rec'), 2000);
+    check('长按：录音态出现（.rec 脉冲）', !!document.querySelector('#voice-box .voice-btn.rec'), $('#voice-box').textContent);
+    check('录音态文案是「松开结束」', ($('#voice-box').textContent || '').indexOf('松开结束') >= 0, $('#voice-box').textContent);
+    await sleep(480);
+    document.dispatchEvent(PE('pointerup', 20, 20));
+    await waitUntil(() => (window.__fake.stops || 0) > stopsBefore, 2000);
+    check('长按≥400ms 松开触发 voiceStop（系统通道收尾）', (window.__fake.stops || 0) > stopsBefore, 'stops=' + window.__fake.stops);
+    check('长按松开没有把会话取消掉', window.__fake.cancels === cancelsBeforeHold, 'cancels=' + window.__fake.cancels);
+    window.__emit({ t: 'final', text: '今天跑了五公里三十分钟', source: 'ondevice', sessionId: window.__fake.sid });
+    await waitUntil(() => String(val('f-dist')) === '5', 2000);
+    check('松开后识别结果照常填表', String(val('f-dist')) === '5', 'f-dist=' + val('f-dist'));
+
+    // 手指滑出按钮热区：按取消处理（不当成结束，避免把环境噪声识别进表单）
+    const cancelsBeforeSlide = window.__fake.cancels;
+    const micBtn3 = byAct('voice:start');
+    micBtn3.dispatchEvent(PE('pointerdown'));
+    await waitUntil(() => !!document.querySelector('#voice-box .voice-btn.rec'), 2000);
+    await sleep(450);
+    document.dispatchEvent(PE('pointermove', 600, 600));
+    await waitUntil(() => window.__fake.cancels > cancelsBeforeSlide, 2000);
+    check('滑出按钮按取消处理（松手取消提示）',
+      ($('#toast').textContent || '').indexOf('松手取消') >= 0 || ($('#voice-box').textContent || '').indexOf('按住说话') >= 0,
+      $('#toast').textContent + ' | ' + $('#voice-box').textContent);
+    check('滑出取消调用了 voiceCancel', window.__fake.cancels > cancelsBeforeSlide, 'cancels=' + window.__fake.cancels);
+    await closeModal();
+
+    /* ---------- 用例 10：Bridge 抛异常 → 人话错误，不是裸异常 ---------- */
+    // 真机上 Java 侧已全部收口 try/catch；这里模拟「万一还有异常漏出去」：
+    // JS 把调用层异常转成人话，绝不能把 WebView 的裸异常串直接给用户看。
+    try { localStorage.removeItem('pacelab.voice.v1'); localStorage.removeItem('pacelab.voice.offline.v1'); } catch (e) {}
+    window.__fake.mode = 'jsthrow';
+    await openModal();
+    click('voice:start');
+    // 调用层异常 → CLIENT(permanent:false) → 降级离线（模型请求被拦成 404）→ 失败态
+    await waitUntil(() => ($('#voice-box').textContent || '').indexOf('手动填') >= 0, 5000);
+    const throwText = $('#voice-box').textContent || '';
+    check('Bridge 抛异常时不显示裸异常字符串', throwText.indexOf('Java exception') < 0, throwText);
+    check('Bridge 抛异常时给出人话错误和出路', throwText.indexOf('手动填') >= 0 || throwText.indexOf('按住') >= 0, throwText);
+    await closeModal();
+    window.__fake.mode = 'ok';
 
     report({ t: 'done', pass: pass, fail: fail });
   } catch (e) {
@@ -377,7 +496,7 @@ function end(code) {
     for (const f of summary.failures) console.log('   - ' + f.name + ' :: ' + f.detail);
   }
   if (summary.web) {
-    const hasVoiceBtn = summary.web.text.indexOf('说一句') >= 0;
+    const hasVoiceBtn = summary.web.text.indexOf('按住说话') >= 0;
     console.log(`  网页版：${summary.web.hasBox ? '有语音区' : '无语音区'}，${hasVoiceBtn ? '!! 竟然显示了语音按钮（不应该）' : '未显示语音按钮 ✔'}`);
     if (hasVoiceBtn) process.exit(1);
   } else {

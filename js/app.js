@@ -1892,11 +1892,16 @@ function handleClick(e) {
 
     // ---- 语音录入 ----
     // 这些分支只动 #voice-box 和 input.value，**绝不 render()**（见语音节开头的铁律 1）
+    // voice:start 的按下/松开优先走 pointer 管线（见下方「长按说话」）；
+    // 这里只接键盘/无 pointer 事件的兑底 click，且要避开长按管线刚处理过的那次按压
     case 'voice:start':
+      if (Date.now() < voicePressClickUntil) break;
       startVoice();
       break;
 
     case 'voice:stop':
+      // 长按松开后的 click 不能把正在收尾的会话取消掉
+      if (Date.now() < voicePressClickUntil) break;
       abortVoice();
       break;
 
@@ -2985,8 +2990,8 @@ function voiceInnerHtml() {
   if (!v) {
     return (
       '<div class="voice-row">' +
-      '<button class="voice-btn" data-act="voice:start">🎤 说一句</button>' +
-      '<div class="voice-hint">' + VOICE_HINT + '</div>' +
+      '<button class="voice-btn" data-act="voice:start">🎤 按住说话</button>' +
+      '<div class="voice-hint">按住说话、松开自动识别。' + VOICE_HINT + '</div>' +
       '</div>' + privacy
     );
   }
@@ -3003,10 +3008,13 @@ function voiceInnerHtml() {
   if (v.state === 'listening') {
     const sub = v.partial
       ? '<div class="voice-partial">' + esc(v.partial) + '</div>'
-      : '<div class="voice-hint">正在听…说完停一下</div>';
+      : '<div class="voice-hint">正在听…</div>';
+    // 录音中手指正按在按钮上，松开即结束（pointer 管线收尾）。
+    // 仍保留 voice:stop 作为取消入口（识别中卡住时的逃生门）；松开后的
+    // click 由 voicePressClickUntil 压掉，不会把正在收尾的会话 abort 掉。
     return (
       '<div class="voice-row">' +
-      '<button class="voice-btn rec" data-act="voice:stop">⏹ 说完了</button>' +
+      '<button class="voice-btn rec" data-act="voice:stop">🎙 松开结束</button>' +
       sub +
       '</div>' + privacy
     );
@@ -3040,7 +3048,7 @@ function voiceInnerHtml() {
     const lowTip = p && p.confidence === 'low' ? vNote('我不太确定，请核对') : '';
     return (
       '<div class="voice-row">' +
-      '<button class="voice-btn done" data-act="voice:start">🎤 再说一次</button>' +
+      '<button class="voice-btn done" data-act="voice:start">🎤 按住再说一次</button>' +
       '<div class="voice-chips">' + voiceChips(v) + '</div>' +
       '</div>' +
       (lowTip || '') +
@@ -3080,10 +3088,10 @@ function voiceInnerHtml() {
   }
   return (
     '<div class="voice-row">' +
-    '<div class="voice-error">' + esc(v.error || '没听清') + '</div>' +
+    '<div class="voice-error">' + esc(v.error || '没听清，再按住说一次试试') + '</div>' +
     '</div>' +
     '<div class="voice-actions">' +
-    '<button class="voice-link" data-act="voice:start">再说一次</button>' +
+    '<button class="voice-link" data-act="voice:start">按住再说一次</button>' +
     '<button class="voice-link" data-act="voice:dismiss">手动填</button>' +
     '</div>' + escape + privacy
   );
@@ -3096,6 +3104,24 @@ function renderVoiceBox() {
   box.innerHTML = voiceInnerHtml();
 }
 
+/**
+ * 把错误翻译成人话。修完主线程收口后 Java 不会再抛裸异常，
+ * 但任何一条 error 分支都不能把原始异常字符串直接怼到用户脸上。
+ */
+function friendlyVoiceError(e) {
+  const code = (e && e.code) || 'UNKNOWN';
+  const msg = String((e && e.message) || '');
+  if (code === 'NO_MATCH') return '这次没能听清，再按住说一次试试';
+  if (code === 'NETWORK' || code === 'TIMEOUT' || code === 'SERVER') return '识别服务没响应，再按住说一次试试';
+  if (code === 'BUSY') return '上一次还没结束，松开后再按住说';
+  // 裸异常特征（类名、堆栈、Java 字样）一律不给用户看
+  if (/exception|\bat [\w$.]+\(|^Java /i.test(msg)) return '这次识别出了点问题，再按住说一次试试';
+  return msg || '没听清，再按住说一次试试';
+}
+
+/** 语音会话序号：上一次会话的迟到回调/异常只允许改「自己这一轮」的 UI 状态 */
+let voiceRunSeq = 0;
+
 /** 启动一次语音录入 */
 async function startVoice() {
   // 已在录音时点按钮 = 立即收尾
@@ -3103,15 +3129,36 @@ async function startVoice() {
     abortVoice();
     return;
   }
-  ui.voice = { state: 'working', label: '准备中…', partial: '', text: '', progress: 0, parsed: null, undo: null, ids: [] };
+  // 正在准备/等权限时重复触发（长按误触两次、弹层刚开又点）：忽略，别把状态搅乱
+  if (ui.voice && (ui.voice.state === 'working' || ui.voice.state === 'permission')) return;
+  const runId = ++voiceRunSeq;
+  ui.voice = { state: 'working', label: '准备中…', partial: '', text: '', progress: 0, parsed: null, undo: null, ids: [], runId: runId };
   renderVoiceBox();
+
+  // 上一次会话的 rejection（取消）可能晚于下一次按下抵达（快速松开再按住），
+  // 不按 runId 过滤的话，旧会话的 catch 会把新会话的 UI 状态清掉，表现为「按了没反应」
+  const isMine = () => !!ui.voice && ui.voice.runId === runId;
 
   try {
     const res = await voice.runVoice({
       onState: (s) => {
-        if (!ui.voice) return;
-        if (s === voice.VOICE_STATE.PERMISSION) ui.voice.state = 'permission';
-        else if (s === voice.VOICE_STATE.SYSTEM_LISTENING || s === voice.VOICE_STATE.OFFLINE_LISTENING) {
+        if (!isMine()) return;
+        if (s === voice.VOICE_STATE.PERMISSION) {
+          ui.voice.state = 'permission';
+          renderVoiceBox();
+          // 长按流程被系统权限弹窗打断：收掉这次会话，授权回来后重新按住再说
+          // （不收掉的话，授权成功后识别器会自己开始听，而用户的手已经松开了）
+          setTimeout(() => {
+            if (!isMine()) return;
+            try {
+              abortVoice();
+              toast('允许麦克风后，重新按住「按住说话」');
+            } catch (e) {
+              /* 弹层可能已关 */
+            }
+          }, 400);
+          return;
+        } else if (s === voice.VOICE_STATE.SYSTEM_LISTENING || s === voice.VOICE_STATE.OFFLINE_LISTENING) {
           ui.voice.state = 'listening';
           ui.voice.partial = '';
         } else if (s === voice.VOICE_STATE.SYSTEM_PROCESSING || s === voice.VOICE_STATE.OFFLINE_DECODING) {
@@ -3127,17 +3174,20 @@ async function startVoice() {
         renderVoiceBox();
       },
       onPartial: (t) => {
-        if (!ui.voice) return;
+        if (!isMine()) return;
         ui.voice.partial = t;
         renderVoiceBox();
       },
       onProgress: (p) => {
-        if (!ui.voice) return;
+        if (!isMine()) return;
         ui.voice.progress = p;
         renderVoiceBox();
       },
       onLevel: () => {},
     });
+
+    // 迟到的结果：会话已被更新的操作接管或取消，不填表、不覆盖状态
+    if (!isMine()) return;
 
     // 识别成功：填表单 + 出结果 chip
     const parsed = res.parsed;
@@ -3150,32 +3200,160 @@ async function startVoice() {
       ids: ids,
       progress: 0,
       partial: '',
+      runId: runId,
     };
     renderVoiceBox();
   } catch (e) {
     const code = (e && e.code) || 'UNKNOWN';
     if (code === 'ABORTED') {
-      ui.voice = null;
-      renderVoiceBox();
+      if (isMine()) {
+        ui.voice = null;
+        renderVoiceBox();
+      }
       return;
     }
+    if (!isMine()) return;
     if (code === 'PERM_DENIED') {
-      ui.voice = { state: 'permDenied', progress: 0, partial: '' };
+      ui.voice = { state: 'permDenied', progress: 0, partial: '', runId: runId };
       renderVoiceBox();
       return;
     }
     ui.voice = {
       state: 'failed',
-      error: (e && e.message) || '没听清，再说一次或手动填',
+      error: friendlyVoiceError(e),
       progress: 0,
       partial: '',
+      runId: runId,
     };
     renderVoiceBox();
   }
 }
 
+/* ---------------- 长按说话（pointer 管线） ----------------
+ *
+ * 交互：按下（pointerdown）立刻开始录音 → 松开（pointerup）自动结束识别出结果；
+ *       按下不足 400ms 视为误触，取消并提示「按住说话」；
+ *       手指滑出按钮热区（留 24px 余量）/ 系统抢走手势（pointercancel）按取消处理。
+ *
+ * 为什么不用 click 委托：长按需要按下时刻、按住时长和滑出检测，click 只有松开时刻。
+ * 为什么还要保留 handleClick 里的 voice:start：键盘触发和 headless 的 el.click()
+ * 没有 pointer 事件前缀，得能走到 startVoice；两者用 voicePressClickUntil 互斥，
+ * 避免松开后跟来的 click 把刚收尾/刚取消的会话再拉起来一次。
+ *
+ * 铁律不变：全流程只改 #voice-box.innerHTML 和 input.value，绝不 render()。
+ */
+
+/** 按下不足这个时长不算一次识别（防误触） */
+const VOICE_HOLD_MIN_MS = 400;
+/** 手指滑出按钮多少像素算「松手取消」 */
+const VOICE_SLIDE_SLACK_PX = 24;
+
+/** 当前按住中的手势：{ el, rect, pointerId, startAt, ended }；null = 没在按 */
+let voicePress = null;
+/** 长按管线处理过的按压，随后跟来的 click 一律忽略到这个时刻为止 */
+let voicePressClickUntil = 0;
+
+function onVoicePressDown(e) {
+  const el = e.target && e.target.closest ? e.target.closest('[data-act="voice:start"]') : null;
+  if (!el) return;
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  // 防止长按触发系统文本选择 / 右键菜单，也避免页面跟着滚动
+  e.preventDefault();
+  voicePressClickUntil = Date.now() + 3000;
+  voicePress = {
+    el: el,
+    // 渲染会随时替换 #voice-box 内部节点，按下时的按钮位置要存快照
+    rect: el.getBoundingClientRect(),
+    pointerId: e.pointerId,
+    startAt: Date.now(),
+    ended: false,
+  };
+  try {
+    // 把后续 pointer 事件钉在这个元素上，手指略微滑出也不丢 pointerup
+    if (typeof el.setPointerCapture === 'function') el.setPointerCapture(e.pointerId);
+  } catch (err) {
+    /* 个别内核不支持，document 级监听兜底 */
+  }
+  startVoice();
+}
+
+function releasePressCapture(p) {
+  try {
+    if (p && p.el && typeof p.el.releasePointerCapture === 'function') {
+      p.el.releasePointerCapture(p.pointerId);
+    }
+  } catch (err) {
+    /* 已经释放过 / 元素已替换，忽略 */
+  }
+}
+
+function onVoicePressMove(e) {
+  const p = voicePress;
+  if (!p || p.ended || e.pointerId !== p.pointerId) return;
+  const r = p.rect;
+  // getBoundingClientRect 在元素被替换后返回全零矩形，此时跳过滑出检测
+  if (!r || (!r.width && !r.height)) return;
+  const out =
+    e.clientX < r.left - VOICE_SLIDE_SLACK_PX ||
+    e.clientX > r.right + VOICE_SLIDE_SLACK_PX ||
+    e.clientY < r.top - VOICE_SLIDE_SLACK_PX ||
+    e.clientY > r.bottom + VOICE_SLIDE_SLACK_PX;
+  if (out) cancelVoicePress('松手取消，重新按住按钮说话');
+}
+
+function onVoicePressUp(e) {
+  const p = voicePress;
+  if (!p || p.ended || e.pointerId !== p.pointerId) return;
+  voicePress = null;
+  p.ended = true;
+  releasePressCapture(p);
+  voicePressClickUntil = Date.now() + 500;
+  const held = Date.now() - p.startAt;
+  if (held < VOICE_HOLD_MIN_MS) {
+    // 误触：不当作一次识别
+    abortVoice();
+    toast('按住说话，松开结束', true);
+    return;
+  }
+  // 正常松开：结束识别出结果（系统通道 stopListening / 离线通道 finalize）。
+  // 结果回来后走既有的 final → applyVoiceToForm，不需要在这里 await。
+  const v = ui.voice;
+  if (v && (v.state === 'listening' || v.state === 'working')) {
+    try {
+      voice.stopCurrent();
+    } catch (err) {
+      /* 会话可能刚好自己结束了 */
+    }
+  }
+}
+
+function onVoicePressCancel(e) {
+  const p = voicePress;
+  if (!p || p.ended || (e && e.pointerId !== undefined && e.pointerId !== p.pointerId)) return;
+  cancelVoicePress('已取消，重新按住说话');
+}
+
+function cancelVoicePress(msg) {
+  const p = voicePress;
+  if (p) {
+    p.ended = true;
+    releasePressCapture(p);
+  }
+  voicePress = null;
+  voicePressClickUntil = Date.now() + 500;
+  abortVoice();
+  if (msg) toast(msg, true);
+}
+
 /** 取消/收尾。注意它同时是「关弹层」和「用户再点一次」的入口。 */
 function abortVoice() {
+  // 按住中的手势一并清掉：弹层中途被关时，手指的状态不能悬在内存里
+  const p = voicePress;
+  if (p) {
+    p.ended = true;
+    releasePressCapture(p);
+    voicePress = null;
+  }
   try {
     voice.abort();
   } catch (e) {
@@ -3295,6 +3473,17 @@ function undoVoice() {
  * 捕获阶段在冒泡被拦截之前就执行，从根上避开这个坑。
  */
 document.addEventListener('click', handleClick, true);
+
+/*
+ * 长按说话的 pointer 管线。捕获阶段（true）注册，先于任何业务冒泡逻辑；
+ * 处理器内部用 closest('[data-act="voice:start"]') 过滤，其它指针操作不受影响。
+ * pointerdown 负责开始，pointerup 负责收尾，pointermove 负责滑出取消，
+ * pointercancel 兜「系统抢走手势」（来电、通知下拉、滚动手势接管）。
+ */
+document.addEventListener('pointerdown', onVoicePressDown, true);
+document.addEventListener('pointermove', onVoicePressMove, true);
+document.addEventListener('pointerup', onVoicePressUp, true);
+document.addEventListener('pointercancel', onVoicePressCancel, true);
 document.addEventListener('change', (e) => {
   if (e.target && e.target.id === 'f-file') handleFileChange(e);
   if (e.target && e.target.id === 'f-plan-file') handlePlanFileChange(e);
