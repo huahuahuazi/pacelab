@@ -23,3 +23,6 @@
 # Gradle wrapper 是可执行 shell 脚本，必须是 LF
 gradlew text eol=lf
 gradlew.bat text eol=crlf
+
+# 语音模型归档（将来若改名成 .vosk 也不能被当文本合并）
+*.vosk binary

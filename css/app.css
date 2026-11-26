@@ -1384,3 +1384,169 @@ select.input {
 }
 .rec-filter .input { flex: 1; min-width: 0; }
 .rec-filter .btn { flex-shrink: 0; white-space: nowrap; }
+
+/* ==========================================================================
+   语音录入
+   位置在「上传跑步截图」和距离/日期之间：两者都是「把口述/截图变成数字」的同一类操作。
+   四个视觉态：idle / listening（红 + 呼吸脉冲）/ working（转圈 + 进度）/ result（chip + 撤销）。
+   注意：所有变化都发生在 #voice-box 内部，绝不触发整页重绘（否则用户手打的字会丢）。
+   ========================================================================== */
+
+.voice-bar {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.voice-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.voice-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--primary-dim);
+  background: var(--primary-soft);
+  color: var(--primary);
+  border-radius: var(--radius-pill);
+  padding: 9px 15px;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+.voice-btn:active { transform: scale(0.97); }
+.voice-btn[disabled] {
+  border-color: var(--border);
+  background: var(--surface-3);
+  color: var(--text-dim);
+}
+.voice-btn.done { border-color: var(--border); background: transparent; color: var(--text-dim); }
+
+/* 录音中：红色 + 呼吸脉冲。用 box-shadow 扩散而不是 transform，
+   避免把按钮撑到换行（旧 WebView 的 flex 计算很敏感）。 */
+.voice-btn.rec {
+  border-color: var(--danger);
+  background: rgba(255, 93, 98, 0.14);
+  color: var(--danger);
+  animation: voicePulse 1.6s ease-in-out infinite;
+}
+@keyframes voicePulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 93, 98, 0.35); }
+  50% { box-shadow: 0 0 0 7px rgba(255, 93, 98, 0); }
+}
+
+.voice-hint {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  line-height: 1.5;
+}
+
+/* 实时字幕气泡：上浮一行，最多两行，超出省略 —— 字幕不是正文，不需要滚动 */
+.voice-partial {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--primary);
+  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.voice-chips {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.voice-chip {
+  font-size: 11.5px;
+  padding: 4px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.voice-warn {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--warn);
+  line-height: 1.5;
+}
+.voice-error {
+  font-size: 12.5px;
+  color: var(--danger);
+  line-height: 1.5;
+}
+
+.voice-actions {
+  display: flex;
+  gap: 14px;
+  margin-top: 9px;
+  flex-wrap: wrap;
+}
+/* 文字按钮的可点区域：高度 30、左右各外扩 6px，手指点得着又不挤 */
+.voice-link {
+  position: relative;
+  background: none;
+  border: 0;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--primary);
+  cursor: pointer;
+  font-family: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.voice-link::after {
+  content: '';
+  position: absolute;
+  top: -6px;
+  bottom: -6px;
+  left: -6px;
+  right: -6px;
+}
+
+/* 离线模型首载进度（3~8 秒，没有它用户以为卡死） */
+.voice-progress {
+  width: 100%;
+  height: 3px;
+  margin-top: 9px;
+  border-radius: 2px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.voice-progress > i {
+  display: block;
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.2s linear;
+}
+
+/* 「识别在本机完成，不上传」—— 这是本项目的卖点，必须一直可见 */
+.voice-note {
+  margin-top: 9px;
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.5;
+}
+
+.voice-fold { margin-top: 9px; }
+
+/* 语音刚填入的字段：粉框高亮 0.8s（JS 加/移除 class，不在 JS 里写颜色） */
+.just-filled {
+  border-color: #ff7ab8 !important;
+  box-shadow: 0 0 0 2px rgba(255, 122, 184, 0.22);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}

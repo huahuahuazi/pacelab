@@ -1,0 +1,48 @@
+%% 语音录入 · 一次成功识别的完整调用链（系统 ASR 路径；离线路径同构）
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant UI as app.js (VoiceBar)
+    participant V as voice.js
+    participant B as voice-bridge.js
+    participant J as MainActivity.VoiceSession
+    participant SA as SpeechRecognizer
+    participant P as voice-parse.js
+
+    U->>UI: 点「🎤 说一句」
+    UI->>V: runVoice({onState,onPartial,onLevel})
+    V->>B: capability()
+    B->>J: AndroidBridge.voiceCapability()
+    J-->>B: {sdk:34,hasSystem:true,hasOnDevice:true,permission:"granted"}
+    B-->>V: Capability
+    V->>B: recognize({lang:"zh-CN",maxMs:20000})
+    B->>J: voiceStart(optsJson)
+    J->>J: runOnUiThread 建会话 s7
+    J->>SA: createOnDeviceSpeechRecognizer / createSpeechRecognizer
+    J-->>B: {ok:true,sessionId:"s7",via:"ondevice"}
+    B-->>V: pending Promise(s7)
+    V-->>UI: onState('systemListening')
+    J->>SA: setRecognitionListener + startListening(EXTRA_*)
+    J-->>B: emit(state listening)
+    B-->>V: state listening
+    V-->>UI: 按钮变红 + 呼吸脉冲
+    U->>SA: 「今天跑了十公里，用了五十分钟」
+    SA-->>J: onPartialResults
+    J-->>B: evaluateJavascript dispatch({t:"partial"})
+    B-->>V: onPartial(text)
+    V-->>UI: 上浮实时字幕
+    SA-->>J: onEndOfSpeech
+    J-->>B: emit(state processing)
+    SA-->>J: onResults(["今天跑了十公里，用了五十分钟"])
+    J-->>B: dispatch({t:"final",text,source})
+    B-->>V: resolve({text,source})
+    V->>P: parseRunUtterance(text)
+    P-->>V: {distanceKm:10,durationSec:3000,date,note,confidence,warnings}
+    V-->>UI: resolve({text,parsed,via:"system"})
+    UI->>UI: applyVoiceToForm() 填 f-dist / f-h f-m f-s / f-date / f-note
+    UI-->>U: 四字段高亮 0.8s + 结果 chip + 撤销
+    U->>UI: 点「保存」
+    UI->>UI: saveRun() 复用现有校验与落盘
+
+    Note over V,B: 失败分支：error(fatal) → reject(code)<br/>NOT_AVAILABLE/CLIENT/LANG_* → markSystemBroken → 离线<br/>NO_MATCH/TIMEOUT/NETWORK → 本次降级不记忆<br/>PERM_DENIED → 不降级（离线也要麦克风）
+    Note over V: 硬超时 maxMs+10s → reject(JS_TIMEOUT)；sessionId 不匹配的事件一律丢弃

@@ -11,11 +11,19 @@
  * 一次跑多个用例：每个 fixture 单独识别一遍，结果分别回传。
  * 引擎和有 worker 只初始化一次，正好顺带验证「复用 worker 不掉进度」。
  */
-const CASES = [
+const ALL_CASES = [
   { name: 'run-shot', ext: 'png' },
   { name: 'cn-dark', ext: 'png' },
   { name: 'user-vivo-card', ext: 'jpg' },
 ];
+
+/**
+ * ?only=user-vivo-card 只跑一个用例。
+ * 单独重跑某个 fixture 是排查的主要手段（全跑一次要几十秒，噪声还大），
+ * 由 verify-ocr.mjs 的 FX 环境变量转进来。
+ */
+const onlyRaw = (new URLSearchParams(location.search).get('only') || '').replace(/\.[a-z0-9]+$/i, '');
+const CASES = onlyRaw ? ALL_CASES.filter((c) => c.name === onlyRaw) : ALL_CASES;
 
 const log = [];
 const put = (s) => { log.push(s); document.getElementById('r').textContent = log.join(' | '); };
@@ -24,9 +32,13 @@ const put = (s) => { log.push(s); document.getElementById('r').textContent = log
  * 一旦截断就变成非法 JSON，服务端 parse 失败会把整条结果静默丢掉。
  * 要截只能截单个字段。
  */
+/** 所有已发出、还没落地的回传。发 done 之前要等它们全部完成，否则服务端会提前 exit。 */
+const pendingReports = [];
 const report = (obj) => {
   const s = encodeURIComponent(JSON.stringify(obj));
-  fetch('http://127.0.0.1:8900/r?d=' + s, { mode: 'no-cors' }).catch(() => {});
+  const p = fetch('http://127.0.0.1:8900/r?d=' + s, { mode: 'no-cors' }).catch(() => {});
+  pendingReports.push(p);
+  return p;
 };
 const errStr = (e) => (!e ? 'null' : (e.name || '?') + ': ' + (e.message || '') + ' | ' + String(e.stack || '').slice(0, 300));
 
@@ -71,6 +83,10 @@ window.addEventListener('unhandledrejection', (e) => report({ t: 'unhandledrejec
       });
     }
 
+    // 关键：先等所有 result 落地，再发 done。
+    // 不然 done 会先到服务端 → 服务端立刻 end() + exit，最后一条用例的结果就丢了，
+    // 表现是「有时少跑一个用例」，CI 上随机红。
+    await Promise.all(pendingReports);
     report({ t: 'done', seconds: ((performance.now() - tAll) / 1000).toFixed(1) });
   } catch (e) {
     report({ t: 'fatal', m: errStr(e) });

@@ -22,7 +22,21 @@ const COPY = [
   'css',
   'js',
   'assets',
-  'vendor',   // OCR 引擎与语言包，漏了就认不出图
+  'vendor',   // OCR 引擎与语言包 + 离线语音模型，漏了就认不出图 / 语音不可用
+];
+
+/**
+ * 打包前必须存在的二进制资产。
+ *
+ * 为什么要硬失败而不是「跳过 + 警告」：这两个文件动辄 5~42MB，是最容易被
+ * `.gitignore` 漏掉的东西。缺了它们的 APK 能装能跑，只是「语音按钮点了没反应」——
+ * 这种功能级缺失绝不能让它悄悄发布出去。
+ */
+const REQUIRED = [
+  { path: 'vendor/tesseract/tesseract.min.js', hint: 'OCR 引擎缺失（不该发生，它在库里）' },
+  { path: 'vendor/tessdata/eng.traineddata', hint: 'OCR 语言包缺失（不该发生，它在库里）' },
+  { path: 'vendor/vosk/vosk.js', hint: '语音引擎缺失：先跑 node tools/fetch-vosk.js' },
+  { path: 'vendor/vosk/model.tgz', hint: '离线语音模型缺失：先跑 node tools/fetch-vosk.js（42MB，不入库）' },
 ];
 
 function rmrf(p) {
@@ -42,6 +56,15 @@ function copyDir(from, to) {
 
 rmrf(DST);
 fs.mkdirSync(DST, { recursive: true });
+
+// 先检查必需资产：缺就直接退出，别产出一个人「能用但语音是死的」的包
+const missing = REQUIRED.filter((r) => !fs.existsSync(path.join(SRC, r.path)));
+if (missing.length) {
+  console.error('\n打包中止：缺这些必需文件');
+  for (const m of missing) console.error('  ✗ ' + m.path + ' —— ' + m.hint);
+  console.error('');
+  process.exit(1);
+}
 
 let bytes = 0;
 for (const item of COPY) {
@@ -65,4 +88,4 @@ for (const item of COPY) {
 })(DST);
 
 console.log(`web 资源已同步 → ${path.relative(SRC, DST)}`);
-console.log(`共 ${(bytes / 1024).toFixed(0)} KB`);
+console.log(`共 ${(bytes / 1024).toFixed(0)} KB（其中离线语音模型 42MB 是大头，APK 会到 62MB 左右）`);

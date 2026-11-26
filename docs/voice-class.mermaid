@@ -1,0 +1,118 @@
+%% 语音录入 · 类与模块关系（PaceLab v1.12）
+%% 纯函数模块 = 静态方法；Android 侧只画协议面
+classDiagram
+    class VoiceParse {
+        <<module js/voice-parse.js 纯函数>>
+        +normalizeUtterance(text) string
+        +parseChineseNumber(str) number
+        +resolveDateWords(text, today) DateSpan
+        +tokenizeNumbers(text) Token[]
+        +parseRunUtterance(text, opts) ParsedRun
+        +formatParsedSummary(parsed) string
+    }
+
+    class ParsedRun {
+        +number distanceKm
+        +number durationSec
+        +string date
+        +string note
+        +string confidence
+        +string[] warnings
+        +object[] ignored
+        +object[] consumed
+        +string raw
+    }
+
+    class Token {
+        +number value
+        +string unit
+        +string unitRaw
+        +int start
+        +int end
+        +boolean chinese
+    }
+
+    class VoiceOrchestrator {
+        <<module js/voice.js>>
+        +VOICE_STATE
+        +runVoice(opts) Promise
+        +abort() void
+        +getLastState() string
+        -chooseChannel(cap, prefs) string
+        -shouldMarkBroken(code) boolean
+    }
+
+    class VoiceBridge {
+        <<module js/voice-bridge.js 系统ASR>>
+        +installVoiceDispatch() void
+        +isBridgeReady() boolean
+        +capability() Capability
+        +requestMic() Promise
+        +recognize(opts) Promise
+        +cancel() void
+        +prefs() Prefs
+        +markSystemBroken(code) void
+    }
+
+    class VoiceOffline {
+        <<module js/voice-offline.js 离线WASM>>
+        +isSupported() boolean
+        +loadModel(onProgress) Promise
+        +transcribeStreaming(opts) Promise
+        +abort() void
+        +dispose() void
+        -ensureVosk() Promise
+        -resampleTo16k(f32, from, to) Float32Array
+        -openMic(ctx) MediaStream
+        -waitSilence() void
+    }
+
+    class Capability {
+        +int sdk
+        +boolean hasSystem
+        +boolean hasOnDevice
+        +string permission
+    }
+
+    class VoiceSession {
+        <<Android MainActivity 内部类>>
+        +String sessionId
+        +SpeechRecognizer recognizer
+        +int mode
+        +start(String optsJson) String
+        +onRequestPermissionsResult(granted) void
+        +cancel() void
+        +release() void
+        -emit(JSONObject o) void
+        -beginListening() void
+    }
+
+    class AndroidBridge {
+        <<@JavascriptInterface>>
+        +voiceCapability() String
+        +voiceRequestMic() String
+        +voiceStart(optsJson) String
+        +voiceCancel(sessionId) void
+        +openAppSettings() void
+    }
+
+    class VoiceUi {
+        <<js/app.js 局部DOM>>
+        +voiceState
+        +renderVoiceBox() void
+        +applyVoiceToForm(parsed) void
+        +undoVoice() void
+        +abortVoice() void
+    }
+
+    VoiceOrchestrator --> VoiceBridge : 第一通道
+    VoiceOrchestrator --> VoiceOffline : 降级通道
+    VoiceOrchestrator --> VoiceParse : text 解析
+    VoiceParse ..> ParsedRun : 产出
+    VoiceParse ..> Token : 产出
+    VoiceBridge ..> Capability : 探测结果
+    VoiceBridge --> AndroidBridge : JS 调用
+    VoiceSession ..> Capability : 提供能力
+    VoiceSession --> AndroidBridge : 事件经 evaluateJavascript 回到 window.__PaceLabVoice
+    VoiceUi --> VoiceOrchestrator : runVoice / abort
+    VoiceUi ..> ParsedRun : 填充四字段

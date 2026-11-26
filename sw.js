@@ -9,7 +9,7 @@
  * 改了业务代码记得把 VERSION 往上加一位，否则用户会一直拿旧缓存。
  */
 
-const VERSION = 'pacelab-v1.11.0';
+const VERSION = 'pacelab-v1.12.0';
 const CORE = [
   './',
   './index.html',
@@ -24,6 +24,12 @@ const CORE = [
   './js/workouts.js',
   './js/plan-import.js',
   './js/records.js',
+  // 语音录入：这四个文件必须一起缓存。voice.js 静态 import 了另外三个，
+  // 少一个就是「断网打开白屏」。42MB 的模型**不在**这里（不能让人网页版首访拉 42MB）。
+  './js/voice-parse.js',
+  './js/voice.js',
+  './js/voice-bridge.js',
+  './js/voice-offline.js',
   './assets/icon.svg',
   './assets/icon-192.png',
   './assets/icon-512.png',

@@ -37,6 +37,7 @@
 - **数据录入** — 距离 + 时/分/秒三格（不用全填，空的按 0 算），或上传跑步截图自动识别
 - **跑动指标** — 平均心率、步频、步幅三个选填字段；步幅留空会按「配速 ÷ 步频」自动算
 - **数据驱动的火柴人** — 首页水平卡片里那个小人，摆腿快慢按你的**步频**生成、腿张开的角度按**步幅**、身体前倾按**配速**。它跑的就是你最近一周的样子，右上角气泡标出近期状态（点开能看到这个结论是怎么算出来的）
+- **语音录入** — 在「录入一次跑步」里点一下「🎤 说一句」，说「今天跑了十公里，用了五十分钟」就自动填好距离/用时/日期/备注（**不会自动保存**，你自己点保存；填错了有「撤销」）。优先用安卓系统识别，系统识别不可用时自动降级到内置的离线中文模型，**全程在本机完成，不上传**。只认距离、用时、日期、备注四项，心率/步频/步幅仍手填
 - **本地 OCR** — Tesseract.js 引擎和语言包都在本机，识别过程图片不出设备；识别前先做放大 + 灰度 + 对比度拉伸，同一张图跑两遍不同版面分割模式再合并候选，小数点被读丢也能救回来
 - **识别不硬填** — 距离、用时、配速三者互相印证才自动填入；对不上就明说，不拿日期时间凑数
 - **水平评估** — VDOT 分级 + 趋势曲线；近 90 天加权，越近的、越接近目标距离的记录权重越高
@@ -102,10 +103,15 @@ git clone https://github.com/huahuahuazi/pacelab.git
 ```bash
 # 一次性准备：JDK 17 + Android SDK（platform-34 / build-tools 34.0.0）
 
+node tools/fetch-vosk.js           # 首次必跑：下载语音引擎(5.5MB)+中文模型(42MB) → vendor/vosk/
+                                   # 42MB 模型不入库（.gitignore 排除），缺了 sync-web 会直接报错退出
 node android/sync-web.mjs          # 把网页资源同步进 assets（每次改网页后都要跑）
 cd android
 ./gradlew assembleRelease          # 产物：app/build/outputs/apk/release/app-release.apk
 ```
+
+> 装上语音之后 APK 从约 15MB 涨到**约 62MB**（42MB 离线模型 + 5.5MB 引擎）。
+> 这是「没有 Google 语音服务的国产 ROM 上也能用」的代价，已和产品确认接受。
 
 装到手机：把 apk 传到手机 → 点击安装 → 允许「未知来源」即可。
 
@@ -134,8 +140,12 @@ cd android
 │   ├── store.js            本机存储 + 导出导入 + 图片压缩
 │   ├── chart.js            SVG 折线图 / 柱状图（零依赖）
 │   ├── ocr.js              截图识别（本地引擎优先，CDN 兜底）
+│   ├── voice-parse.js      中文口语 → 距离/用时/日期/备注（纯函数，被单测锁死）
+│   ├── voice.js            语音编排：系统识别优先，失败降级离线
+│   ├── voice-bridge.js     Android SpeechRecognizer 的 JS 侧（协议 + 超时 + 失败记忆）
+│   ├── voice-offline.js    vosk-browser 离线通道（采样、重采样、VAD 收尾）
 │   └── app.js              UI 渲染与交互
-├── vendor/                 OCR 引擎与语言包（离线用，约 11MB）
+├── vendor/                 OCR 引擎与语言包（约 11MB）+ 语音引擎与模型（约 48MB，模型不入库）
 ├── android/                安卓壳工程（WebView + 本地资源）
 │   ├── app/src/main/java/com/pacelab/coach/MainActivity.java
 │   └── sync-web.mjs        网页资源 → assets 同步脚本
@@ -146,6 +156,9 @@ cd android
 │   └── syntax-compat.test.mjs  旧 WebView 语法兼容
 ├── tools/
 │   ├── verify-ocr.mjs      端到端识别验证（起无头浏览器真跑）
+│   ├── verify-voice.mjs    语音录入端到端验证（假 AndroidBridge，24 项断言）
+│   ├── voice-probe.html    语音 spike 页（手动开麦克风 / ?auto=1 自动跑推理）
+│   ├── fetch-vosk.js       下载并重打包语音引擎与模型
 │   ├── verify-upload.mjs   端到端上传链路验证
 │   └── fixtures/           验证用截图（英文结果页 / 中文深色主题）
 ├── docs/

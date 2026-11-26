@@ -16,6 +16,8 @@ import * as S from './store.js';
 import { lineChart, barChart, weeklyBuckets } from './chart.js';
 import { recognizeRunImage, warmup } from './ocr.js';
 import { readPlanFile, parsePlanRows, buildImportedPlan, entriesFromPreview, fileFromSharedPayload } from './plan-import.js';
+import * as voice from './voice.js';
+import { WARNING_TEXT } from './voice-parse.js';
 import {
   upsertWorkout, removeWorkout, removeWorkoutByKey, archivePlanDone, actualFromRun as woActualFromRun,
   summarizeWorkouts, groupByMonth,
@@ -81,6 +83,8 @@ const ui = {
   // 上一次成功删除历史的时间戳。列表删完会上移，同一像素点落到下一行，
   // 没有这个冷却窗，手抖连点一下就是两条。
   lastHistDelAt: 0,
+  // 语音录入：{state, partial, text, progress, parsed, undo, ids}。null = 没用语音
+  voice: null,
 };
 
 // 支持 index.html#plan 直接打开某个 tab。
@@ -927,6 +931,8 @@ function modalAddRun(preset) {
 
       <div class="mt16"></div>
 
+      ${voiceBarHtml()}
+
       <div class="field-row">
         <div class="field">
           <label>距离 <span class="opt">km</span></label>
@@ -1744,6 +1750,9 @@ function render() {
 
 function openAdd(preset) {
   ui.modal = { type: 'add', preset: preset || null };
+  // 上一次的语音结果不能跟着新弹层一起出现：它绑定的字段值已经不存在了，
+  // 「撤销」会把用户刚打开的空表单还原成上一轮的旧值。
+  ui.voice = null;
   render();
   warmup();
   bindDurationPreview();
@@ -1752,6 +1761,14 @@ function openAdd(preset) {
 function closeModal() {
   ui.modal = null;
   ui.ocr = null;
+  // 语音必须显式收掉：识别回调回来时 #voice-box 已经不存在，引擎还占着麦克风。
+  // 不 abort 的话，下一次打开弹层会被上一次的迟到结果填一遍。
+  try {
+    abortVoice();
+  } catch (e) {
+    /* 语音模块没起来也不能挡住关弹层 */
+  }
+  ui.voice = null;
   // 统一收口：点遮罩、点取消都走这里，待确认的参数不能留在内存里
   ui.pendingPlan = null;
   // 导入预览里的 state 是一整份数据副本，留在内存里纯属占地方，也容易被下一次误用
@@ -1872,6 +1889,37 @@ function handleClick(e) {
       if (refreshDurationHint) refreshDurationHint();
       break;
     }
+
+    // ---- 语音录入 ----
+    // 这些分支只动 #voice-box 和 input.value，**绝不 render()**（见语音节开头的铁律 1）
+    case 'voice:start':
+      startVoice();
+      break;
+
+    case 'voice:stop':
+      abortVoice();
+      break;
+
+    case 'voice:undo':
+      undoVoice();
+      break;
+
+    case 'voice:dismiss':
+      ui.voice = null;
+      renderVoiceBox();
+      break;
+
+    case 'voice:settings':
+      if (!voice.openSettings()) toast('打不开系统设置页', true);
+      break;
+
+    // 把「本机识别不行」的记忆清掉，下一次重新先试系统识别
+    case 'voice:retry-system':
+      voice.retrySystem();
+      toast('已恢复系统识别，再点「说一句」试试');
+      ui.voice = null;
+      renderVoiceBox();
+      break;
 
     case 'run:save': {
       saveRun(el.dataset.plan, el.dataset.day);
@@ -2866,6 +2914,376 @@ async function handleFileChange(e) {
   if (foldBody) foldBody.textContent = (res.text || '').trim() || '（未识别出文字）';
 }
 
+/* ---------------- 语音录入 ---------------- */
+
+/*
+ * 三条铁律（违反任何一条都会丢用户数据）：
+ *  1. **绝不调用 render()**。modalAddRun 的输入框是 DOM 现值的唯一来源，
+ *     重绘会按 `pre`（打开弹层时的 preset）重建，用户手打的数字直接消失。
+ *     所以语音区只改 `#voice-box.innerHTML`，字段直接设 input.value。
+ *  2. `closeModal()` 里必须 `abortVoice()`。否则识别回调回来时 DOM 已经没了，
+ *     下一次打开弹层还会被上一次的迟到结果填一遍。
+ *  3. 只覆盖语音**明确给出**的字段。没说的保持原值，且给一次「撤销」。
+ */
+
+const VOICE_HINT = '比如「今天跑了十公里，用了五十分钟」';
+const FILLED_MS = 800;
+
+function fmtClock(sec) {
+  const t = Math.max(0, Math.round(sec));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = t % 60;
+  const p2 = (v) => (v < 10 ? '0' + v : String(v));
+  return h > 0 ? h + ':' + p2(m) + ':' + p2(s) : p2(m) + ':' + p2(s);
+}
+
+/** 语音区里的一行小字提示 */
+function vNote(text) {
+  return '<div class="voice-note">' + esc(text) + '</div>';
+}
+
+function voiceChips(v) {
+  const p = v.parsed;
+  if (!p) return '';
+  const approx = p.confidence === 'low' ? '≈' : '';
+  const chips = [];
+  if (p.distanceKm != null) chips.push('<span class="voice-chip">' + approx + '距离 ' + p.distanceKm + ' km</span>');
+  if (p.durationSec != null) chips.push('<span class="voice-chip">' + approx + '用时 ' + fmtClock(p.durationSec) + '</span>');
+  if (p.date) chips.push('<span class="voice-chip">' + approx + '日期 ' + p.date.slice(5) + '</span>');
+  if (p.note) chips.push('<span class="voice-chip">备注 ' + esc(p.note.slice(0, 12)) + '</span>');
+  return chips.join('');
+}
+
+function voiceWarnText(p) {
+  if (!p || !p.warnings || !p.warnings.length) return '';
+  const words = [];
+  for (let i = 0; i < p.warnings.length; i++) {
+    const w = WARNING_TEXT[p.warnings[i]];
+    if (w && words.indexOf(w) < 0) words.push(w);
+  }
+  return words.join('；');
+}
+
+/**
+ * 语音区的外层容器。网页版（没有 AndroidBridge）整块不输出 ——
+ * 一个点了没反应的按钮比没有按钮更糟，用户会以为 App 坏了。
+ */
+function voiceBarHtml() {
+  if (!voice.isAvailable()) return '';
+  return '<div class="voice-bar" id="voice-box">' + voiceInnerHtml() + '</div>';
+}
+
+/**
+ * 只生成 **#voice-box 的 innerHTML**。
+ * 外层 .voice-bar 容器在 modalAddRun 里一次性输出，之后只换里面。
+ */
+function voiceInnerHtml() {
+  const v = ui.voice;
+  const privacy = '<div class="voice-note">🔒 识别在本机完成，不上传</div>';
+
+  if (!v) {
+    return (
+      '<div class="voice-row">' +
+      '<button class="voice-btn" data-act="voice:start">🎤 说一句</button>' +
+      '<div class="voice-hint">' + VOICE_HINT + '</div>' +
+      '</div>' + privacy
+    );
+  }
+
+  if (v.state === 'permission') {
+    return (
+      '<div class="voice-row">' +
+      '<button class="voice-btn rec" data-act="voice:stop">⏹ 取消</button>' +
+      '<div class="voice-hint">请在系统弹窗里点「允许」，才能开始听</div>' +
+      '</div>' + privacy
+    );
+  }
+
+  if (v.state === 'listening') {
+    const sub = v.partial
+      ? '<div class="voice-partial">' + esc(v.partial) + '</div>'
+      : '<div class="voice-hint">正在听…说完停一下</div>';
+    return (
+      '<div class="voice-row">' +
+      '<button class="voice-btn rec" data-act="voice:stop">⏹ 说完了</button>' +
+      sub +
+      '</div>' + privacy
+    );
+  }
+
+  if (v.state === 'working') {
+    const pct = v.progress > 0 ? Math.round(v.progress * 100) : 0;
+    let label = '正在识别…';
+    if (v.label) label = v.label;
+    if (pct > 0 && pct < 100) label = '准备离线模型 ' + pct + '%';
+    const bar = pct > 0 && pct < 100
+      ? '<div class="voice-progress"><i style="width:' + pct + '%"></i></div>'
+      : '';
+    return (
+      '<div class="voice-row">' +
+      '<button class="voice-btn" disabled>⏳ ' + esc(label) + '</button>' +
+      bar +
+      '</div>' + privacy
+    );
+  }
+
+  if (v.state === 'result') {
+    const p = v.parsed;
+    const warn = voiceWarnText(p);
+    const missing = [];
+    if (p && p.distanceKm == null) missing.push('距离');
+    if (p && p.durationSec == null) missing.push('用时');
+    const missTip = missing.length && (p && (p.distanceKm != null || p.durationSec != null))
+      ? vNote('没听到' + missing.join('和') + '，手动补一下')
+      : '';
+    const lowTip = p && p.confidence === 'low' ? vNote('我不太确定，请核对') : '';
+    return (
+      '<div class="voice-row">' +
+      '<button class="voice-btn done" data-act="voice:start">🎤 再说一次</button>' +
+      '<div class="voice-chips">' + voiceChips(v) + '</div>' +
+      '</div>' +
+      (lowTip || '') +
+      (warn ? '<div class="voice-warn">' + esc(warn) + '</div>' : '') +
+      (missTip || '') +
+      '<div class="voice-actions">' +
+      '<button class="voice-link" data-act="voice:undo">撤销填入</button>' +
+      '<button class="voice-link" data-act="voice:dismiss">关闭语音区</button>' +
+      '</div>' +
+      '<details class="ocr-fold voice-fold"><summary>识别原文 · 数字对不上时展开对照</summary>' +
+      '<div class="ocr-raw">' + esc(v.text || '（空）') + '</div></details>' +
+      privacy
+    );
+  }
+
+  if (v.state === 'permDenied') {
+    return (
+      '<div class="voice-row">' +
+      '<div class="voice-error">没麦克风权限，语音用不了</div>' +
+      '</div>' +
+      '<div class="voice-actions">' +
+      '<button class="voice-link" data-act="voice:settings">去设置开权限</button>' +
+      '<button class="voice-link" data-act="voice:dismiss">手动填</button>' +
+      '</div>' + privacy
+    );
+  }
+
+  // failed
+  // 如果系统识别已经被记成「这台机器不行」，必须给一个手动恢复的入口：
+  // 自动拉黑（NO_MATCH 连两次 / CLIENT / LANG_*）之后用户是没有感知的，
+  // 只会觉得「语音变笨了」，而且再也回不到系统识别。
+  let escape = '';
+  if (typeof voice.isSystemBroken === 'function' && voice.isSystemBroken()) {
+    escape =
+      '<div class="voice-note">系统识别已改用离线模型 · ' +
+      '<button class="voice-link" data-act="voice:retry-system">重试系统识别</button></div>';
+  }
+  return (
+    '<div class="voice-row">' +
+    '<div class="voice-error">' + esc(v.error || '没听清') + '</div>' +
+    '</div>' +
+    '<div class="voice-actions">' +
+    '<button class="voice-link" data-act="voice:start">再说一次</button>' +
+    '<button class="voice-link" data-act="voice:dismiss">手动填</button>' +
+    '</div>' + escape + privacy
+  );
+}
+
+/** 只重画语音区，不碰整页（见本节开头的铁律 1） */
+function renderVoiceBox() {
+  const box = document.getElementById('voice-box');
+  if (!box) return;
+  box.innerHTML = voiceInnerHtml();
+}
+
+/** 启动一次语音录入 */
+async function startVoice() {
+  // 已在录音时点按钮 = 立即收尾
+  if (ui.voice && ui.voice.state === 'listening') {
+    abortVoice();
+    return;
+  }
+  ui.voice = { state: 'working', label: '准备中…', partial: '', text: '', progress: 0, parsed: null, undo: null, ids: [] };
+  renderVoiceBox();
+
+  try {
+    const res = await voice.runVoice({
+      onState: (s) => {
+        if (!ui.voice) return;
+        if (s === voice.VOICE_STATE.PERMISSION) ui.voice.state = 'permission';
+        else if (s === voice.VOICE_STATE.SYSTEM_LISTENING || s === voice.VOICE_STATE.OFFLINE_LISTENING) {
+          ui.voice.state = 'listening';
+          ui.voice.partial = '';
+        } else if (s === voice.VOICE_STATE.SYSTEM_PROCESSING || s === voice.VOICE_STATE.OFFLINE_DECODING) {
+          ui.voice.state = 'working';
+          ui.voice.label = '正在识别…';
+        } else if (s === voice.VOICE_STATE.OFFLINE_LOADING) {
+          ui.voice.state = 'working';
+          ui.voice.label = '准备离线模型…';
+        } else if (s === voice.VOICE_STATE.PARSING) {
+          ui.voice.state = 'working';
+          ui.voice.label = '正在整理…';
+        }
+        renderVoiceBox();
+      },
+      onPartial: (t) => {
+        if (!ui.voice) return;
+        ui.voice.partial = t;
+        renderVoiceBox();
+      },
+      onProgress: (p) => {
+        if (!ui.voice) return;
+        ui.voice.progress = p;
+        renderVoiceBox();
+      },
+      onLevel: () => {},
+    });
+
+    // 识别成功：填表单 + 出结果 chip
+    const parsed = res.parsed;
+    const ids = applyVoiceToForm(parsed);
+    ui.voice = {
+      state: 'result',
+      text: res.text,
+      parsed: parsed,
+      undo: ui.voice ? ui.voice.undo : null,
+      ids: ids,
+      progress: 0,
+      partial: '',
+    };
+    renderVoiceBox();
+  } catch (e) {
+    const code = (e && e.code) || 'UNKNOWN';
+    if (code === 'ABORTED') {
+      ui.voice = null;
+      renderVoiceBox();
+      return;
+    }
+    if (code === 'PERM_DENIED') {
+      ui.voice = { state: 'permDenied', progress: 0, partial: '' };
+      renderVoiceBox();
+      return;
+    }
+    ui.voice = {
+      state: 'failed',
+      error: (e && e.message) || '没听清，再说一次或手动填',
+      progress: 0,
+      partial: '',
+    };
+    renderVoiceBox();
+  }
+}
+
+/** 取消/收尾。注意它同时是「关弹层」和「用户再点一次」的入口。 */
+function abortVoice() {
+  try {
+    voice.abort();
+  } catch (e) {
+    /* 引擎可能还没起来 */
+  }
+  if (ui.voice && ui.voice.state !== 'result') ui.voice = null;
+  renderVoiceBox();
+}
+
+/**
+ * 把解析结果填进表单。
+ *
+ * @returns {string[]} 被改动的元素 id 列表（高亮用，撤销时也按它还原）
+ */
+function applyVoiceToForm(parsed) {
+  const ids = [];
+  const undo = { dist: null, h: null, m: null, s: null, date: null, note: null };
+  const get = (id) => document.getElementById(id);
+
+  if (!parsed) {
+    ui.voice.undo = undo;
+    return ids;
+  }
+
+  // 距离
+  const dist = get('f-dist');
+  if (dist && parsed.distanceKm != null) {
+    undo.dist = dist.value;
+    dist.value = String(parsed.distanceKm);
+    ids.push('f-dist');
+  }
+
+  // 用时：走 OCR 用的同一套进位规则，别在这里另写一份
+  if (parsed.durationSec != null) {
+    const h = get('f-h');
+    const m = get('f-m');
+    const s = get('f-s');
+    if (h) undo.h = h.value;
+    if (m) undo.m = m.value;
+    if (s) undo.s = s.value;
+    fillDurationFields(parsed.durationSec);
+    if (h) ids.push('f-h');
+    if (m) ids.push('f-m');
+    if (s) ids.push('f-s');
+  }
+
+  // 日期：只能 ≤ 今天（表单的 max 也是今天，但用户可能手改过 DOM）
+  const dateEl = get('f-date');
+  if (dateEl && parsed.date) {
+    const today = toDateStr(new Date());
+    const value = parsed.date > today ? today : parsed.date;
+    undo.date = dateEl.value;
+    dateEl.value = value;
+    ids.push('f-date');
+  }
+
+  // 备注
+  const noteEl = get('f-note');
+  if (noteEl) {
+    const nothingNumeric = parsed.distanceKm == null && parsed.durationSec == null;
+    // 什么都没听出来时（NO_DATA），把原话放进备注 —— 用户至少能看到机器听到了什么
+    const text = nothingNumeric && !parsed.note ? String(parsed.raw || '') : parsed.note;
+    if (text) {
+      undo.note = noteEl.value;
+      noteEl.value = String(text).slice(0, 60);
+      ids.push('f-note');
+    }
+  }
+
+  ui.voice.undo = undo;
+  if (refreshDurationHint) refreshDurationHint();
+
+  // 粉框高亮 0.8s：让用户一眼看到哪几格被动过（不是靠 inline style，样式在 CSS 里）
+  for (let i = 0; i < ids.length; i++) {
+    const el = get(ids[i]);
+    if (!el) continue;
+    el.classList.add('just-filled');
+    (function (node) {
+      setTimeout(function () {
+        node.classList.remove('just-filled');
+      }, FILLED_MS);
+    })(el);
+  }
+  return ids;
+}
+
+/** 撤销：把四个字段一次性还原成语音之前的值 */
+function undoVoice() {
+  const v = ui.voice;
+  if (!v || !v.undo) return;
+  const u = v.undo;
+  const set = (id, val) => {
+    if (val === null) return;
+    const el = document.getElementById(id);
+    if (el) el.value = val;
+  };
+  set('f-dist', u.dist);
+  set('f-h', u.h);
+  set('f-m', u.m);
+  set('f-s', u.s);
+  set('f-date', u.date);
+  set('f-note', u.note);
+  if (refreshDurationHint) refreshDurationHint();
+  ui.voice = null;
+  renderVoiceBox();
+  toast('已撤销语音填入');
+}
+
 /* ---------------- 启动 ---------------- */
 
 /*
@@ -2887,6 +3305,9 @@ document.addEventListener('change', (e) => {
     render();
   }
 });
+
+// 语音：先把原生事件入口装上，否则识别结果/错误永远回不到网页
+voice.install();
 
 // 老数据里打卡只在 plan.days 上，先补一遍归档，历史页才不会空
 backfillWorkouts();

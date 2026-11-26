@@ -3,6 +3,19 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- 语音录入：系统识别和内置离线模型都靠它采音。
+         注意权限被拒时**两条通道都不通**，所以 UI 上给的是「去设置」而不是「改用离线」。 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- targetSdk >= 30 的包默认看不见别的应用，包括系统的语音识别服务。
+         少了这段声明，SpeechRecognizer.isRecognitionAvailable() 会恒返回 false，
+         现象是「明明装了 Google App 却提示没有识别器」——而且不报任何错。 -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:fullBackupContent="true"

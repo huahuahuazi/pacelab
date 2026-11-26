@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>语音识别探针 · PaceLab</title>
+<style>
+  body { background: #0b0d10; color: #e6e8eb; font: 14px/1.6 -apple-system, system-ui, "Segoe UI", sans-serif; margin: 0; padding: 18px; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .sub { color: #8b929c; font-size: 12px; margin-bottom: 16px; }
+  button { background: #2b6cff; color: #fff; border: 0; border-radius: 10px; padding: 10px 16px; font-size: 14px; }
+  button:disabled { background: #2a2f38; color: #6b727c; }
+  #bar { height: 4px; background: #1b1f26; border-radius: 2px; margin: 12px 0; overflow: hidden; }
+  #bar > i { display: block; height: 100%; width: 0; background: #2b6cff; transition: width .15s; }
+  pre { background: #12151b; border: 1px solid #1e242d; border-radius: 10px; padding: 12px; white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+  .k { color: #6b727c; }
+  .v { color: #4ade80; }
+  .w { color: #f59e0b; }
+</style>
+</head>
+<body>
+<h1>语音识别探针</h1>
+<div class="sub">
+  用途：确认 <code>vendor/vosk/vosk.js</code> + <code>vendor/vosk/model.zip</code> 能被真正加载并跑推理。<br />
+  手动打开：点「开始说话」用麦克风做一次真人测试。<br />
+  <code>?auto=1</code>：无麦克风的自动化模式，只验「模型能加载 + 推理能跑」，结果回传给
+  <code>tools/verify-voice.mjs</code>。
+</div>
+
+<div id="bar"><i></i></div>
+<p>
+  <button id="btn" disabled>开始说话</button>
+  <span id="state" class="k">准备中…</span>
+</p>
+<p id="partial" class="v" style="min-height:1.6em"></p>
+<pre id="log"></pre>
+
+<script type="module">
+/**
+ * 这个文件不参与业务，只做两件事：
+ *   1. 手动 spike：真人对着麦克风说一句，看到文本出来，确认模型格式/体积/耗时可用
+ *   2. 自动化：headless 里没有麦克风，用「合成音频 + 同一条推理路径」验证模型能加载能出结果
+ *
+ * 为什么要单独有个探针页：离线通道的失败方式很安静 —— 模型格式不对、zip 顶层目录不匹配、
+ * wasm 初始化失败，在业务页面上看起来都只是「语音没反应」。这个页面把每一步都打出来。
+ */
+
+const params = new URLSearchParams(location.search);
+const AUTO = params.get('auto') === '1';
+const CALLBACK = params.get('cb') || 'http://127.0.0.1:8902/r';
+// 换模型文件（比如试某台设备专用的模型）时用：?model=../vendor/vosk/model.tgz
+const MODEL_OVERRIDE = params.get('model') || '';
+// 真语音样本（16k/任意采样率 wav 都行，内部会重采样）：?auto=1&wav=./fixtures/voice-sample.wav
+// 没有真人录音时用合成音频，只能验「推理跑得起来」，验不了「认得出字」。
+const WAV = params.get('wav') || '';
+
+const $ = (id) => document.getElementById(id);
+const logEl = $('log');
+const stateEl = $('state');
+const partialEl = $('partial');
+const btn = $('btn');
+const fill = document.querySelector('#bar > i');
+
+const lines = [];
+function log(s, cls) {
+  const t = new Date().toISOString().slice(11, 23);
+  lines.push('<span class="k">' + t + '</span> ' + (cls ? '<span class="' + cls + '">' + s + '</span>' : s));
+  logEl.innerHTML = lines.slice(-40).join('\n');
+}
+
+/** 回传给本地回调服务（自动化模式用）。截断只能截单字段，不能截整个 JSON。 */
+function report(obj) {
+  if (!AUTO) return;
+  const s = encodeURIComponent(JSON.stringify(obj));
+  fetch(CALLBACK + '?d=' + s, { mode: 'no-cors' }).catch(() => {});
+}
+
+function progress(p) {
+  fill.style.width = Math.round(Math.max(0, Math.min(1, p)) * 100) + '%';
+  stateEl.textContent = p >= 1 ? '模型就绪' : '加载模型 ' + Math.round(p * 100) + '%';
+}
+
+window.addEventListener('error', (e) => {
+  log('window.error: ' + e.message, 'w');
+  report({ t: 'fatal', m: 'window.error: ' + e.message });
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const m = (e.reason && (e.reason.message || e.reason)) || String(e.reason);
+  log('unhandledrejection: ' + m, 'w');
+  report({ t: 'fatal', m: 'unhandledrejection: ' + m });
+});
+
+const mem = () => {
+  const m = performance && performance.memory;
+  return m ? { used: Math.round(m.usedJSHeapSize / 1048576), total: Math.round(m.totalJSHeapSize / 1048576) } : null;
+};
+
+/**
+ * 合成一段「像人说话」的音频：带音节包络的噪声。
+ * 目的不是让它识别出词，而是让 wasm 的推理路径真的跑起来（VAD/解码/结果回调）。
+ */
+function synthSpeech(seconds) {
+  const ctx = new OfflineAudioContext(1, Math.round(16000 * seconds), 16000);
+  const buf = ctx.createBuffer(1, ctx.length, 16000);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) {
+    const t = i / 16000;
+    const env = 0.5 + 0.5 * Math.sin(2 * Math.PI * 3.2 * t); // 约 3 个音节/秒
+    d[i] = (Math.random() * 2 - 1) * 0.25 * env;
+  }
+  return buf;
+}
+
+let offline = null;
+
+async function boot() {
+  const t0 = performance.now();
+  offline = await import('../js/voice-offline.js');
+  log('模块加载完成（' + Math.round(performance.now() - t0) + 'ms）');
+  log('isSupported() = ' + offline.isSupported(), 'v');
+  report({ t: 'stage', name: 'module', ms: Math.round(performance.now() - t0), supported: offline.isSupported() });
+
+  // 引擎与模型的体积（顺带确认文件真的在）
+  const modelPath = MODEL_OVERRIDE ? MODEL_OVERRIDE.replace(/^\.\.\//, '') : 'vendor/vosk/model.tgz';
+  for (const p of ['vendor/vosk/vosk.js', modelPath]) {
+    try {
+      const r = await fetch('../' + p, { method: 'HEAD' });
+      const len = Number(r.headers.get('content-length') || 0);
+      log(p + ' → ' + r.status + ' · ' + (len / 1048576).toFixed(1) + 'MB');
+      report({ t: 'asset', p, status: r.status, mb: Number((len / 1048576).toFixed(1)) });
+    } catch (e) {
+      log(p + ' → 读取失败 ' + e.message, 'w');
+      report({ t: 'asset', p, status: -1 });
+    }
+  }
+
+  const before = mem();
+  const tm = performance.now();
+  stateEl.textContent = '加载模型 0%';
+  const model = await offline.loadModel((p) => progress(p), MODEL_OVERRIDE || '');
+  const loadMs = Math.round(performance.now() - tm);
+  progress(1);
+  log('模型加载完成 ' + loadMs + 'ms' + (before ? ' · JS 堆 ' + before.used + '→' + (mem() || {}).used + 'MB' : ''), 'v');
+  report({ t: 'stage', name: 'model', ms: loadMs, before: before, after: mem() });
+
+  if (!AUTO) {
+    btn.disabled = false;
+    btn.textContent = '开始说话';
+    stateEl.textContent = '模型就绪，点按钮说一句';
+    btn.onclick = () => runMic(model);
+    return model;
+  }
+
+  // ---- 自动化：音频喂进同一条推理路径 ----
+  let buf;
+  if (WAV) {
+    const res = await fetch(WAV);
+    if (!res.ok) throw new Error('取不到样本音频 ' + WAV + '（' + res.status + '）');
+    const raw = await res.arrayBuffer();
+    const decoder = new OfflineAudioContext(1, 1, 16000);
+    buf = await decoder.decodeAudioData(raw);
+    log('样本音频 ' + WAV + ' · ' + buf.duration.toFixed(2) + 's · ' + buf.sampleRate + 'Hz', 'v');
+  } else {
+    buf = synthSpeech(5);
+    log('没有给 wav 样本，用合成音频（只验推理链路，不验识别准确率）', 'w');
+  }
+  const tp = performance.now();
+  const out = await offline.transcribeBuffer(buf, {
+    model: model,
+    onPartial: (t) => {
+      if (t) partialEl.textContent = t;
+    },
+  });
+  const inferMs = Math.round(performance.now() - tp);
+  log('推理完成 ' + inferMs + 'ms（' + buf.duration.toFixed(1) + 's 音频）· 输出 ' + JSON.stringify(out.text), 'v');
+  report({ t: 'stage', name: 'infer', ms: inferMs, text: out.text.slice(0, 120), after: mem() });
+
+  // 再来一次，验证「模型常驻、二次识别零加载」
+  const tp2 = performance.now();
+  const out2 = await offline.transcribeBuffer(buf, { model: model });
+  const infer2 = Math.round(performance.now() - tp2);
+  log('二次推理 ' + infer2 + 'ms · 输出 ' + JSON.stringify(out2.text), 'v');
+  report({ t: 'stage', name: 'infer2', ms: infer2, text: out2.text.slice(0, 120) });
+
+  report({ t: 'done', total: Math.round(performance.now() - t0) });
+  stateEl.textContent = '自动化检查完成';
+  return model;
+}
+
+async function runMic(model) {
+  btn.disabled = true;
+  stateEl.textContent = '正在听…说完停一下';
+  partialEl.textContent = '';
+  try {
+    const out = await offline.transcribeStreaming({
+      model: model,
+      onPartial: (t) => {
+        if (t) partialEl.textContent = t;
+      },
+      onLevel: (lv) => {
+        fill.style.width = Math.round(lv * 100) + '%';
+      },
+    });
+    log('识别结果：' + JSON.stringify(out.text), 'v');
+    stateEl.textContent = '识别完成，可以再点一次';
+    partialEl.textContent = out.text || '（没听清）';
+  } catch (e) {
+    log('识别失败：' + ((e && e.message) || e), 'w');
+    stateEl.textContent = '失败：' + ((e && e.message) || e);
+  }
+  btn.disabled = false;
+}
+
+boot().catch((e) => {
+  const m = (e && e.message) || String(e);
+  log('启动失败：' + m, 'w');
+  report({ t: 'fatal', m: m });
+  stateEl.textContent = '失败：' + m;
+});
+</script>
+</body>
+</html>

@@ -26,6 +26,12 @@ const BROWSER = EDGE_CANDIDATES.find((p) => fs.existsSync(p));
 const STATIC_PORT = 8898;
 const CALLBACK_PORT = 8900;
 
+/**
+ * 只跑一个 fixture：`FX=user-vivo-card.jpg node tools/verify-ocr.mjs`
+ * 全跑一次要几十秒，排查单个样本时没必要把另外两个也拖上。
+ */
+const ONLY = String(process.env.FX || '').replace(/\.[a-z0-9]+$/i, '');
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -112,7 +118,11 @@ const callbackSrv = http.createServer((req, res) => {
   } else if (d.t === 'done') console.log(`  全部跑完，总计 ${d.seconds}s`);
   else console.log(`  ${d.t} ${d.m || ''}`);
 
-  if (d.t === 'done') end(0);
+  if (d.t === 'done') {
+    // 探针页已经 await 过自己的回传，这里再留一点余量：跨进程的 no-cors fetch
+    // 落地时机不受我们控制，宁等 300ms 也不要随机丢一条用例。
+    setTimeout(() => end(0), 300);
+  }
   if (d.t === 'fatal') end(1, d.m);
 });
 
@@ -141,7 +151,12 @@ function end(code, fatal) {
   }
 
   let bad = 0;
-  for (const [name, exp] of Object.entries(EXPECT)) {
+  const expected = ONLY ? Object.entries(EXPECT).filter(([name]) => name === ONLY) : Object.entries(EXPECT);
+  if (!expected.length) {
+    console.log(`!! FX=${process.env.FX} 不匹配 EXPECT 里的任何用例`);
+    process.exit(1);
+  }
+  for (const [name, exp] of expected) {
     const got = results.find((r) => r.name === name);
     console.log(`\n[${name}] ${exp.desc}`);
     if (!got) {
@@ -189,7 +204,7 @@ staticSrv.listen(STATIC_PORT, '127.0.0.1', () => {
         '--disable-gpu',
         '--no-sandbox',
         `--user-data-dir=${path.join(process.env.TEMP || '/tmp', 'pacelab_ocr_verify')}`,
-        `http://127.0.0.1:${STATIC_PORT}/tools/ocr-probe.html`,
+        `http://127.0.0.1:${STATIC_PORT}/tools/ocr-probe.html` + (ONLY ? '?only=' + encodeURIComponent(ONLY) : ''),
       ],
       { stdio: 'ignore' }
     );
